@@ -1,0 +1,7 @@
+# Pinned to match the repo convention and the toolchain the local
+# ~/.cargo/bin symlinks point at, so a local build and a CI build agree.
+# Sharing a target dir across toolchains is what produced the E0514
+# collisions this pin exists to prevent.
+[toolchain]
+channel = "1.93.1"
+components = ["rustfmt", "clippy"]

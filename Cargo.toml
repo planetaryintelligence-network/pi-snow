@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pi-snow-core",
+    "crates/pi-snow-io",
+    "crates/pi-snow-physics",
+    "crates/pi-snow-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/improbability-engineers/pi-pod"
+
+[workspace.dependencies]
+pi-snow-core = { path = "crates/pi-snow-core" }
+pi-snow-io = { path = "crates/pi-snow-io" }
+pi-snow-physics = { path = "crates/pi-snow-physics" }
+
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive"] }
+approx = "0.5"
+criterion = { version = "0.7", features = ["html_reports"] }
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.bench]
+inherits = "release"

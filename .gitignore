@@ -1,0 +1,3 @@
+# Per-checkout target dir. Never shared between worktrees or sessions;
+# CARGO_TARGET_DIR stays unset. See the repo CLAUDE.md.
+/target

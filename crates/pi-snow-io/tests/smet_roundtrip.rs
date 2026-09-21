@@ -13,6 +13,11 @@ fn fixture(name: &str) -> String {
     std::fs::read_to_string(format!("{path}{name}")).expect("fixture readable")
 }
 
+// The TA and RH literals below carry more digits than an f64 holds, because the
+// pipeline writes forcing with `.17g` and these are copied character for
+// character out of the file. Truncating them to what clippy considers
+// representable would make the test assert something the file does not say.
+#[allow(clippy::excessive_precision)]
 #[test]
 fn forcing_smet_parses_with_the_fields_the_engine_needs() {
     let smet = Smet::parse(&fixture("forcing_ULAMB.smet")).unwrap();

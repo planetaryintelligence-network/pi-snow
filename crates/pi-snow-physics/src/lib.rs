@@ -1,1 +1,10 @@
-//! Placeholder; filled in at its build-order stage.
+//! Physical parameterisations for a one-dimensional snow cover.
+//!
+//! Clean-room: every parameterisation here is implemented from a published
+//! source that someone read, and carries that citation in its doc comment. A
+//! parameterisation whose coefficients could not be read from a source is
+//! **absent** rather than reconstructed from memory. See
+//! `experiments/phase-2-rust-engine-v1/citation-audit.md` for what is sourced
+//! and what is not.
+
+pub mod thermal;

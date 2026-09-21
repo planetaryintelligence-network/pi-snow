@@ -11,15 +11,27 @@ pub const RHO_WATER: f64 = 1000.0;
 /// Density of dry air at 0 degrees C and 1013.25 hPa, kg m^-3.
 pub const RHO_AIR: f64 = 1.1;
 
-/// Specific heat capacity of ice at 0 degrees C, J kg^-1 K^-1.
-pub const C_ICE: f64 = 2100.0;
+/// Specific heat capacity of ice at -10 degrees C, J kg^-1 K^-1.
+///
+/// Bouvet et al. (2024), *Multiscale modeling of heat and mass transfer in dry
+/// snow*, The Cryosphere 18, 4285-4313, Table 1. Ice's heat capacity varies
+/// with temperature by roughly 0.5 % per kelvin, so the -10 C value is a choice,
+/// not a constant of nature; it is the one the source used and the one the
+/// conductivity parameterisation was fitted alongside.
+pub const C_ICE: f64 = 2000.0;
 /// Specific heat capacity of liquid water, J kg^-1 K^-1.
 pub const C_WATER: f64 = 4190.0;
 /// Specific heat capacity of air at constant pressure, J kg^-1 K^-1.
-pub const C_AIR: f64 = 1004.67;
+///
+/// Bouvet et al. (2024) Table 1, at -10 degrees C.
+pub const C_AIR: f64 = 1005.0;
 
-/// Thermal conductivity of pure ice, W m^-1 K^-1.
-pub const K_ICE: f64 = 2.22;
+/// Thermal conductivity of pure ice at -10 degrees C, W m^-1 K^-1.
+///
+/// Bouvet et al. (2024) Table 1. Paired with `C_ICE` and `C_AIR` above: the
+/// three are used together in the same mixture rule, so taking them from one
+/// source at one temperature keeps them mutually consistent.
+pub const K_ICE: f64 = 2.3;
 /// Thermal conductivity of liquid water, W m^-1 K^-1.
 pub const K_WATER: f64 = 0.5984;
 /// Thermal conductivity of still air, W m^-1 K^-1.

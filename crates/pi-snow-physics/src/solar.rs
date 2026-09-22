@@ -183,3 +183,37 @@ pub fn on_slope(
         global_on_slope: direct_on_slope + sky_diffuse_on_slope + ground_reflected,
     }
 }
+
+/// Total solar irradiance at 1 AU, W m^-2: Kopp and Lean (2011), GRL 38,
+/// L01706, 1360.8 +/- 0.5, read in the primary paper.
+pub const SOLAR_CONSTANT: f64 = 1360.8;
+
+/// Earth-Sun distance factor `(r0 / r)^2` from Spencer (1971), via pvlib's
+/// `get_extra_radiation` (secondary). Evaluated at the fractional day, for the
+/// same reason as the declination.
+pub fn eccentricity_factor(time: DateTime<Utc>) -> f64 {
+    let hours = time.hour() as f64 + time.minute() as f64 / 60.0 + time.second() as f64 / 3600.0;
+    let b = 2.0 * std::f64::consts::PI * (time.ordinal() as f64 - 1.0 + hours / 24.0) / 365.0;
+    1.00011
+        + 0.034221 * b.cos()
+        + 0.00128 * b.sin()
+        + 0.000719 * (2.0 * b).cos()
+        + 7.7e-5 * (2.0 * b).sin()
+}
+
+/// Split global horizontal shortwave into direct and diffuse horizontal parts,
+/// W m^-2, by the Erbs clearness-index correlation. With the sun at or below
+/// the horizon everything is diffuse. The clearness index is capped at 1: the
+/// forcing can exceed the clear-sky top-of-atmosphere value at very low sun
+/// through interpolation, and Erbs is undefined above 1.
+pub fn split_global(ghi: f64, sun: &SunPosition, time: DateTime<Utc>) -> (f64, f64) {
+    let ghi = ghi.max(0.0);
+    let cos_z = sun.zenith_deg.to_radians().cos();
+    if cos_z <= 0.0 || ghi == 0.0 {
+        return (0.0, ghi);
+    }
+    let extraterrestrial = SOLAR_CONSTANT * eccentricity_factor(time) * cos_z;
+    let kt = (ghi / extraterrestrial).min(1.0);
+    let diffuse = erbs_diffuse_fraction(kt) * ghi;
+    (ghi - diffuse, diffuse)
+}

@@ -170,3 +170,31 @@ fn erbs_diffuse_fraction_matches_its_piecewise_form() {
         (solar::erbs_diffuse_fraction(0.8) - solar::erbs_diffuse_fraction(0.8 + 1e-9)).abs() < 5e-3
     );
 }
+
+#[test]
+fn eccentricity_peaks_near_perihelion_and_dips_near_aphelion() {
+    // The Earth is closest to the Sun in early January and farthest in early
+    // July, so (r0/r)^2 is about 1.034 and 0.967 there.
+    let jan = solar::eccentricity_factor(Utc.with_ymd_and_hms(2026, 1, 3, 12, 0, 0).unwrap());
+    let jul = solar::eccentricity_factor(Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap());
+    assert!(jan > 1.03 && jan < 1.04, "{jan}");
+    assert!(jul > 0.96 && jul < 0.97, "{jul}");
+}
+
+#[test]
+fn the_global_split_conserves_energy_and_goes_diffuse_at_night() {
+    let t = Utc.with_ymd_and_hms(2026, 1, 20, 19, 20, 0).unwrap();
+    let sun = solar::sun_position(t, 40.6, -111.6);
+    for ghi in [50.0, 300.0, 550.0] {
+        let (dir, dif) = solar::split_global(ghi, &sun, t);
+        assert_relative_eq!(dir + dif, ghi, max_relative = 1e-12);
+        assert!(dir >= 0.0 && dif > 0.0);
+    }
+    // A clear midday sky is mostly direct; an overcast one mostly diffuse.
+    let (clear_dir, _) = solar::split_global(550.0, &sun, t);
+    let (dull_dir, _) = solar::split_global(80.0, &sun, t);
+    assert!(clear_dir / 550.0 > 0.6 && dull_dir / 80.0 < 0.1);
+    let night = Utc.with_ymd_and_hms(2026, 1, 20, 7, 0, 0).unwrap();
+    let dark = solar::sun_position(night, 40.6, -111.6);
+    assert_eq!(solar::split_global(5.0, &dark, night), (0.0, 5.0));
+}

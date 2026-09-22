@@ -8,6 +8,7 @@
 //! and what is not.
 
 pub mod atmosphere;
+pub mod metamorphism;
 pub mod new_snow;
 pub mod settlement;
 pub mod solar;

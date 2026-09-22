@@ -114,3 +114,16 @@ fn a_deep_pack_absorbs_everything_before_the_ground() {
     let r = albedo::shortwave(&column(layers), 600.0, 70_000.0);
     assert!(r.to_ground < 1e-6, "{}", r.to_ground);
 }
+
+#[test]
+fn albedo_does_not_depend_on_whether_the_sun_is_up() {
+    // Regression: with zero incoming shortwave the function returned a zeroed
+    // result, so every night hour reported albedo 0 and the hourly pAlbedo
+    // (an RF1.1 feature) averaged 0.39 where the reference reports 0.84.
+    let c = column(vec![element(0.1, 100.0, 1.0, 0.5, 0.3, 0.0)]);
+    let day = albedo::shortwave(&c, 500.0, 70_000.0);
+    let night = albedo::shortwave(&c, 0.0, 70_000.0);
+    assert_relative_eq!(night.albedo, day.albedo, max_relative = 1e-12);
+    assert_eq!(night.reflected, 0.0);
+    assert!(night.per_element.iter().all(|&x| x == 0.0));
+}

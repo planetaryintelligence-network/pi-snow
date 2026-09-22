@@ -57,7 +57,9 @@ pub struct Shortwave {
 /// `pressure` (Pa).
 pub fn shortwave(column: &Column, incoming: f64, pressure: f64) -> Shortwave {
     let n = column.elements.len();
-    if n == 0 || incoming <= 0.0 {
+    // Only an empty column returns early: albedo is a property of the snow,
+    // not of the flux, and must be reported at night too.
+    if n == 0 {
         return Shortwave {
             per_element: vec![0.0; n],
             ..Shortwave::default()
@@ -77,6 +79,7 @@ pub fn shortwave(column: &Column, incoming: f64, pressure: f64) -> Shortwave {
         .map(|(w, a)| w * a)
         .sum();
 
+    let incoming = incoming.max(0.0);
     let mut per_element = vec![0.0; n];
     // Band 3 is absorbed at the surface.
     let surface = BAND_FRACTION[2] * (1.0 - a3) * incoming;

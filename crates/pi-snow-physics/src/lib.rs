@@ -7,6 +7,7 @@
 //! `experiments/phase-2-rust-engine-v1/citation-audit.md` for what is sourced
 //! and what is not.
 
+pub mod atmosphere;
 pub mod settlement;
 pub mod solar;
 pub mod stability;

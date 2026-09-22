@@ -60,10 +60,30 @@ fn yen_conductivity_does_not_reach_ice_at_ice_density() {
 }
 
 #[test]
+fn yen_1981_is_the_default_and_matches_the_original_report() {
+    // Yen (1981) CRREL 81-10 eq. 34: lambda = 2.22362 rho^1.885, rho in Mg/m3.
+    // At 1 Mg/m3 the expression is exactly its coefficient.
+    assert_eq!(Conductivity::default(), Conductivity::Yen1981);
+    assert_relative_eq!(
+        Conductivity::Yen1981.of_density(1000.0),
+        2.22362,
+        max_relative = 1e-12
+    );
+    assert_relative_eq!(
+        Conductivity::Yen1981.of_density(250.0),
+        2.22362 * 0.25_f64.powf(1.885),
+        max_relative = 1e-12
+    );
+    // Vionnet's transcription with k_ice = 2.3 runs a few percent higher.
+    let ratio = Conductivity::YenCrocus.of_density(250.0) / Conductivity::Yen1981.of_density(250.0);
+    assert!(ratio > 1.0 && ratio < 1.10, "ratio {ratio}");
+}
+
+#[test]
 fn yen_conductivity_is_monotonic_and_bounded() {
     let mut previous = 0.0;
     for density in [50.0, 100.0, 200.0, 300.0, 500.0, 700.0, RHO_ICE] {
-        let k = Conductivity::YenCrocus.of_density(density);
+        let k = Conductivity::Yen1981.of_density(density);
         assert!(k > previous, "conductivity must increase with density");
         assert!(k < K_ICE, "snow cannot conduct better than solid ice");
         previous = k;

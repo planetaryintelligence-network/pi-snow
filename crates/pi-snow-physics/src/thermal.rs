@@ -25,15 +25,24 @@ use pi_snow_core::{Column, Element};
 
 /// Which published effective-thermal-conductivity parameterisation to use.
 ///
-/// Only `YenCrocus` is implemented, because it is the only one whose
-/// coefficients were read from a source rather than recalled. Sturm et al.
-/// (1997) and Calonne et al. (2011) are the other two standard choices and both
-/// are named in the experiment's gap list; they are deliberately absent rather
-/// than implemented from memory, since a wrong coefficient here propagates into
-/// every temperature in the profile.
+/// Both implemented forms are Yen's, and both were read from a source.
+/// Sturm et al. (1997) and Calonne et al. (2011) are the other two standard
+/// choices; their coefficients have only been seen second-hand, so they are
+/// absent rather than implemented, since a wrong coefficient here propagates
+/// into every temperature in the profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum Conductivity {
+    /// `lambda = 2.22362 * rho^1.885`, rho in Mg m^-3.
+    ///
+    /// Yen (1981), *Review of thermal properties of snow, ice and sea ice*,
+    /// CRREL Report 81-10, eq. 34, p. 16, read in the original: his regression
+    /// on the combined data of seven earlier investigators, correlation 0.8614.
+    /// Yen notes it runs low as density approaches that of ice. The default,
+    /// because it is the primary source.
+    #[default]
+    Yen1981,
     /// `k = k_ice * (rho / rho_water)^1.88`.
     ///
     /// Vionnet et al. (2012), *The detailed snowpack scheme Crocus and its
@@ -44,17 +53,26 @@ pub enum Conductivity {
     /// Note it does **not** tend to `k_ice` as density tends to ice density; at
     /// 917 kg m^-3 it gives 0.8497 of it. That is a property of the fit, not
     /// a transcription error, and there is a test asserting it stays that way.
+    ///
+    /// With this crate's `K_ICE` of 2.3 it runs 3 to 4 % above Yen's original
+    /// coefficients; kept as a labelled variant for comparison with Crocus.
     YenCrocus,
 }
 
 /// Exponent in the Yen form as printed in Vionnet et al. (2012) Eq. 18.
 const YEN_EXPONENT: f64 = 1.88;
+/// Coefficient and exponent of Yen (1981) eq. 34 as printed, rho in Mg m^-3.
+const YEN_1981_COEFFICIENT: f64 = 2.22362;
+const YEN_1981_EXPONENT: f64 = 1.885;
 
 impl Conductivity {
     /// Effective thermal conductivity of snow of bulk density `density`
     /// (kg m^-3), in W m^-1 K^-1.
     pub fn of_density(self, density: f64) -> f64 {
         match self {
+            Conductivity::Yen1981 => {
+                YEN_1981_COEFFICIENT * (density / 1000.0).powf(YEN_1981_EXPONENT)
+            }
             Conductivity::YenCrocus => K_ICE * (density / RHO_WATER).powf(YEN_EXPONENT),
         }
     }

@@ -37,9 +37,16 @@ pub const K_WATER: f64 = 0.5984;
 /// Thermal conductivity of still air, W m^-1 K^-1.
 pub const K_AIR: f64 = 0.026;
 
-/// Latent heat of fusion, J kg^-1.
-pub const LH_FUSION: f64 = 333_700.0;
+/// Latent heat of fusion at 0 degrees C and 1 atm, J kg^-1.
+///
+/// Yen (1981), CRREL Report 81-10, p. 14, citing Rossini et al. (1952). The
+/// scan's text layer reads "33.5 kJ/kg", a dropped digit; 333.5 is confirmed
+/// independently by Murphy and Koop's (2005) triple-point latent heats.
+pub const LH_FUSION: f64 = 333_500.0;
 /// Latent heat of sublimation, J kg^-1.
+///
+/// Yen (1981): practically constant at 2838 kJ/kg between 213 and 272 K. Agrees
+/// within 0.15 % with Murphy and Koop (2005), 51059 J/mol at the triple point.
 pub const LH_SUBLIMATION: f64 = 2_838_000.0;
 /// Latent heat of vaporisation, J kg^-1.
 pub const LH_VAPORISATION: f64 = LH_SUBLIMATION - LH_FUSION;

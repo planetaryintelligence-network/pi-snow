@@ -8,3 +8,4 @@
 //! and what is not.
 
 pub mod thermal;
+pub mod settlement;

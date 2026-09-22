@@ -85,26 +85,56 @@ fn buried_surface_hoar_strength_is_the_lehning_2004_regression() {
 }
 
 #[test]
-fn skier_stress_at_38_degrees_is_0_14_over_h() {
-    // Jamieson and Johnston (1998): for a 500 N/m skier line load on a
-    // 38-degree slope, Fohn's expression reduces to 0.14 / h kPa, h in metres.
-    // With ski penetration P it becomes 0.14 / (h - P). This is what lets Sk38
-    // be computed without Fohn's alpha_max table, which was not obtained.
-    assert_relative_eq!(stability::skier_shear_stress_38_kpa(1.0, 0.0), 0.14);
-    assert_relative_eq!(stability::skier_shear_stress_38_kpa(0.8, 0.3), 0.14 / 0.5);
+fn skier_stress_at_38_degrees_by_each_published_form() {
+    // Schweizer et al. (2006) eq. 1: 155 / (h - P) Pa. Jamieson and Johnston
+    // (1998): 0.14 / h kPa for a 500 N/m line load. Either removes the need
+    // for Fohn's alpha_max table, which was not obtained.
+    use stability::SkierForm::*;
+    assert_relative_eq!(
+        stability::skier_shear_stress_38_kpa(Schweizer2006, 1.0, 0.0),
+        0.155
+    );
+    assert_relative_eq!(
+        stability::skier_shear_stress_38_kpa(JamiesonJohnston1998, 1.0, 0.0),
+        0.14
+    );
+    assert_relative_eq!(
+        stability::skier_shear_stress_38_kpa(Schweizer2006, 0.8, 0.3),
+        0.155 / 0.5
+    );
 }
 
 #[test]
-fn penetration_is_the_recommended_jamieson_johnston_regression() {
-    // P = 42.4 / rho_30 (r = 0.72), the fit J&J (1998) say they use, with
-    // rho_30 = rho_bar + 150 (0.3 - h/2) from their nominal 150 kg m^-4
-    // density gradient. Not 43.3 / rho_bar (r = 0.50), and not the 0.8 factor
-    // the frozen extractor applies, which no source read contains.
-    let (rho_bar, h) = (200.0, 1.0);
-    let rho_30 = rho_bar + 150.0 * (0.3 - h / 2.0);
+fn penetration_by_each_published_form() {
+    // Schweizer (2006) p. 54: P = 34.6 / rho_30, rho_30 the mean density of the
+    // upper 30 cm. 34.6 = 0.8 * 43.3 to three figures: the frozen extractor's
+    // 0.8 is this. J&J (1998): P = 42.4 / rho_30 with rho_30 estimated from
+    // the mean slab density.
+    use stability::SkierForm::*;
+    assert_eq!(stability::SkierForm::default(), Schweizer2006);
     assert_relative_eq!(
-        stability::ski_penetration_m(rho_bar, h),
+        stability::ski_penetration(Schweizer2006, 160.0, 999.0, 9.9),
+        34.6 / 160.0
+    );
+    let rho_30 = 200.0 + 150.0 * (0.3 - 0.5);
+    assert_relative_eq!(
+        stability::ski_penetration(JamiesonJohnston1998, 999.0, 200.0, 1.0),
         42.4 / rho_30,
+        max_relative = 1e-12
+    );
+}
+
+#[test]
+fn upper_30_cm_density_weights_by_thickness_and_stops_at_30_cm() {
+    let profile = vec![
+        layer(0.35, 0.50, 400.0, GrainClass::RG), // below 30 cm: ignored
+        layer(0.10, 0.25, 200.0, GrainClass::RG), // contributes 0.20 m
+        layer(0.0, 0.10, 100.0, GrainClass::PP),  // contributes 0.10 m
+    ];
+    let expected = (100.0 * 0.10 + 200.0 * 0.20) / 0.30;
+    assert_relative_eq!(
+        stability::upper_mean_density(&profile, 0.30),
+        expected,
         max_relative = 1e-12
     );
 }
@@ -120,21 +150,8 @@ fn sk38_above_the_ski_penetration_depth_is_the_ceiling_as_the_reference_writes()
         layer(0.0, 0.10, 90.0, GrainClass::PP),
     ];
     let idx = stability::indices(&profile, 1.0);
-    // A 10 cm slab of 90 kg/m3 snow: penetration 42.4 / rho_30 is far deeper.
-    assert!(stability::ski_penetration_m(90.0, 0.10) > 0.10);
+    // A 10 cm slab of 90 kg/m3 snow: penetration 34.6 / 90 = 0.38 m.
     assert_eq!(idx[0].sk38, Some(stability::INDEX_CAP));
-}
-
-#[test]
-fn the_extractor_penetration_form_is_available_but_not_the_default() {
-    // 0.8 * 43.3 / rho_bar, as the frozen extractor computes pen_depth. The 0.8
-    // is in no source read, so it is an option, not the default.
-    use stability::Penetration;
-    assert_eq!(Penetration::default(), Penetration::JamiesonJohnston1998);
-    assert_relative_eq!(
-        stability::ski_penetration(Penetration::ExtractorForm, 160.0, 0.5),
-        0.8 * 43.3 / 160.0
-    );
 }
 
 #[test]

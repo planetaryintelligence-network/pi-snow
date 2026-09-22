@@ -14,8 +14,9 @@
 //!   stress and ski penetration: Jamieson and Johnston (1998), *Refinements to
 //!   the stability index for skier-triggered dry-slab avalanches*, Annals of
 //!   Glaciology 26, 296-302.
-//! * SSI: Bellaire et al. (2006, ISSW Telluride, 38-43), which restates
-//!   Schweizer et al. (2006); the latter was not obtained.
+//! * Sk38 in SNOWPACK's form, SSI and ski penetration: Schweizer et al.
+//!   (2006), CRST 46, 52-59, eqs. 1-5 and p. 54. Bellaire et al. (2006, ISSW)
+//!   restate the same and were read first.
 //! * Critical cut length: Richter et al. (2019), *Validating modeled critical
 //!   crack length for crack propagation in the snow cover model SNOWPACK*, The
 //!   Cryosphere 13, 3353-3366, eqs. 1-3.
@@ -166,44 +167,69 @@ fn normal_load_factor(class: Option<GrainClass>, strength_kpa: f64, sigma_zz_kpa
     }
 }
 
-/// Skier-induced shear stress on a 38-degree slope, kPa, for slab thickness
-/// `h` and ski penetration `p` (both m): `0.14 / (h - p)`, Jamieson and
-/// Johnston (1998). The reduction to this closed form is what removes the need
-/// for Fohn's (1987) alpha_max table, which was not obtained.
-pub fn skier_shear_stress_38_kpa(h: f64, penetration: f64) -> f64 {
-    0.14 / (h - penetration)
-}
-
-/// How ski penetration depth is estimated.
+/// Which published form of the skier index to use: it fixes both the skier's
+/// shear stress at 38 degrees and the ski penetration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Penetration {
-    /// `P = 42.4 / rho_30`, `rho_30 = rho_bar + 150 (0.3 - h/2)`: the fit
-    /// Jamieson and Johnston (1998) report as better (r = 0.72) and use.
-    /// The default, because it is the published recommendation.
+pub enum SkierForm {
+    /// Schweizer, Bellaire, Fierz, Lehning and Pielmeier (2006), *Evaluating
+    /// and improving the stability predictions of the snow cover model
+    /// SNOWPACK*, CRST 46, 52-59, read in full. Skier stress `155 / (h - P)` Pa
+    /// at 38 degrees (their eq. 1), and `P = 34.6 / rho_30` with `rho_30` the
+    /// mean density of the upper 30 cm of the snowpack (p. 54). The default: it
+    /// is the paper that describes SNOWPACK's own stability module.
+    ///
+    /// `34.6 = 0.8 * 43.3` to three figures, which is where the frozen RF1.1
+    /// extractor's otherwise unexplained 0.8 comes from.
     #[default]
+    Schweizer2006,
+    /// Jamieson and Johnston (1998): skier stress `0.14 / (h - P)` kPa at 38
+    /// degrees and `P = 42.4 / rho_30` with `rho_30 = rho_bar + 150 (0.3 - h/2)`
+    /// estimated from the mean slab density, their r = 0.72 fit.
     JamiesonJohnston1998,
-    /// `P = 0.8 * 43.3 / rho_bar`, the form the frozen RF1.1 feature extractor
-    /// uses for its own `pen_depth`. 43.3 is J&J's weaker fit (r = 0.50); the
-    /// 0.8 appears in no source read. Offered because the reference engine's
-    /// Sk38 behaves as if it used this form (stage 6 comparison, lab notes),
-    /// and marked as a fit to the reference, not as sourced physics.
-    ExtractorForm,
 }
 
-/// Ski penetration, m, by the published default form.
-pub fn ski_penetration_m(rho_bar: f64, h: f64) -> f64 {
-    ski_penetration(Penetration::JamiesonJohnston1998, rho_bar, h)
+/// Skier-induced shear stress on a 38-degree slope, kPa, for slab thickness
+/// `h` and ski penetration `p` (both m). The closed form at 38 degrees is what
+/// removes the need for Fohn's (1987) alpha_max table, which was not obtained.
+pub fn skier_shear_stress_38_kpa(form: SkierForm, h: f64, penetration: f64) -> f64 {
+    let numerator = match form {
+        SkierForm::Schweizer2006 => 0.155,
+        SkierForm::JamiesonJohnston1998 => 0.14,
+    };
+    numerator / (h - penetration)
 }
 
-/// Ski penetration, m, from the mean slab density `rho_bar` and slab
-/// thickness `h`, by a chosen form.
-pub fn ski_penetration(model: Penetration, rho_bar: f64, h: f64) -> f64 {
-    match model {
-        Penetration::JamiesonJohnston1998 => {
-            let rho_30 = (rho_bar + 150.0 * (0.3 - h / 2.0)).max(1.0);
+/// Ski penetration, m.
+///
+/// `upper_30_density` is the thickness-weighted mean density of the top 0.30
+/// m of the snowpack (Schweizer 2006); `slab_density` and `h` are the mean
+/// density and thickness of the slab above the layer (J&J 1998).
+pub fn ski_penetration(form: SkierForm, upper_30_density: f64, slab_density: f64, h: f64) -> f64 {
+    match form {
+        SkierForm::Schweizer2006 => 34.6 / upper_30_density.max(1.0),
+        SkierForm::JamiesonJohnston1998 => {
+            let rho_30 = (slab_density + 150.0 * (0.3 - h / 2.0)).max(1.0);
             42.4 / rho_30
         }
-        Penetration::ExtractorForm => 0.8 * 43.3 / rho_bar.max(1.0),
+    }
+}
+
+/// Thickness-weighted mean density of the top `depth` metres of a profile,
+/// bottom layer first.
+pub fn upper_mean_density(layers: &[Layer], depth: f64) -> f64 {
+    let (mut mass, mut thickness) = (0.0, 0.0);
+    for l in layers.iter().rev() {
+        let take = l.thickness.min((depth - thickness).max(0.0));
+        if take <= 0.0 {
+            break;
+        }
+        mass += l.density * take;
+        thickness += take;
+    }
+    if thickness > 0.0 {
+        mass / thickness
+    } else {
+        0.0
     }
 }
 
@@ -276,21 +302,18 @@ pub struct Indices {
 
 /// Indices for every layer of a profile, bottom layer first.
 pub fn indices(layers: &[Layer], snow_height_m: f64) -> Vec<Indices> {
-    indices_with(layers, snow_height_m, Penetration::default())
+    indices_with(layers, snow_height_m, SkierForm::default())
 }
 
-/// Indices for every layer, with a chosen penetration form.
+/// Indices for every layer, with a chosen skier-index form.
 ///
 /// Where the ski penetrates past a layer, Jamieson and Johnston (1998) define
 /// its skier index as 0. The reference engine writes the ceiling there instead,
 /// treating the layer as not skier-relevant. That convention is copied: the
 /// `Ss` time series feeding an RF1.1 feature is a profile minimum, and a 0 in
 /// every shallow layer would pull it to zero for a bookkeeping reason.
-pub fn indices_with(
-    layers: &[Layer],
-    snow_height_m: f64,
-    penetration_model: Penetration,
-) -> Vec<Indices> {
+pub fn indices_with(layers: &[Layer], snow_height_m: f64, form: SkierForm) -> Vec<Indices> {
+    let upper_30 = upper_mean_density(layers, 0.30);
     let n = layers.len();
     let (sin, cos) = (PSI_38.sin(), PSI_38.cos());
     let mut out = Vec::with_capacity(n);
@@ -321,11 +344,12 @@ pub fn indices_with(
         let sn38 = (resisting / sigma_xz).min(INDEX_CAP);
 
         let rho_bar = weight * 1e3 / (GRAVITY * h);
-        let penetration = ski_penetration(penetration_model, rho_bar, h);
+        let penetration = ski_penetration(form, upper_30, rho_bar, h);
         let sk38 = if penetration >= h {
             INDEX_CAP
         } else {
-            (resisting / (sigma_xz + skier_shear_stress_38_kpa(h, penetration))).min(INDEX_CAP)
+            (resisting / (sigma_xz + skier_shear_stress_38_kpa(form, h, penetration)))
+                .min(INDEX_CAP)
         };
         let ssi = layers.get(i + 1).map(|above| {
             (sk38

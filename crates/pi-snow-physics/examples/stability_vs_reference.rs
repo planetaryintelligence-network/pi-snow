@@ -4,7 +4,7 @@
 //!
 //! Usage: stability_vs_reference <file.pro> [timestamp dd.mm.yyyy HH:MM:SS]
 use pi_snow_io::pro::Profiles;
-use pi_snow_physics::stability::{self, Layer, Penetration};
+use pi_snow_physics::stability::{self, Layer, SkierForm};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -48,12 +48,9 @@ fn main() {
         hs,
         top.len()
     );
-    for model in [
-        Penetration::JamiesonJohnston1998,
-        Penetration::ExtractorForm,
-    ] {
+    for model in [SkierForm::Schweizer2006, SkierForm::JamiesonJohnston1998] {
         let ours = stability::indices_with(&layers, hs / 100.0, model);
-        println!("\npenetration model {model:?}");
+        println!("\nskier form {model:?}");
         let refs = [
             ("Sn38", &sn, 6.0),
             ("Sk38", &sk, 6.0),

@@ -60,7 +60,7 @@ fn calm(ilwr: f64) -> Atmosphere {
 fn emissivity_is_the_middle_of_dozier_and_warren() {
     // Dozier and Warren (1982): all-wave emissivity 0.985 to 0.990, independent
     // of grain size. The midpoint is our choice within their range.
-    assert!(surface::SNOW_EMISSIVITY >= 0.985 && surface::SNOW_EMISSIVITY <= 0.990);
+    const { assert!(surface::SNOW_EMISSIVITY >= 0.985 && surface::SNOW_EMISSIVITY <= 0.990) };
 }
 
 #[test]

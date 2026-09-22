@@ -11,5 +11,6 @@ thiserror.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+pi-snow-io = { path = "../pi-snow-io" }
 approx.workspace = true
 proptest.workspace = true

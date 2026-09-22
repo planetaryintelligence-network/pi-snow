@@ -389,6 +389,7 @@ dependencies = [
  "approx",
  "chrono",
  "pi-snow-core",
+ "pi-snow-io",
  "proptest",
  "thiserror",
 ]

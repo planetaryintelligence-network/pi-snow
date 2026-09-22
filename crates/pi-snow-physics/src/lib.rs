@@ -9,5 +9,6 @@
 
 pub mod settlement;
 pub mod solar;
+pub mod stability;
 pub mod thermal;
 pub mod water;

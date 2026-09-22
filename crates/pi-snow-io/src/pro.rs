@@ -50,11 +50,13 @@ impl Timestep {
     /// "inconsistent profile arrays" error rather than as a parse failure.
     pub fn element_field(&self, code: &str) -> Option<&[f64]> {
         let values = self.fields.get(code)?;
-        Some(if code == "0513" && values.len() == self.element_count() + 1 {
-            &values[..values.len() - 1]
-        } else {
-            values.as_slice()
-        })
+        Some(
+            if code == "0513" && values.len() == self.element_count() + 1 {
+                &values[..values.len() - 1]
+            } else {
+                values.as_slice()
+            },
+        )
     }
 
     /// Number of elements, taken from `0501`. Zero for a bare-ground timestep,
@@ -129,12 +131,13 @@ impl Profiles {
             let code = line.get(..4).unwrap_or_default();
             if code == "0500" {
                 let stamp = line.split(',').nth(1).unwrap_or_default().trim();
-                let timestamp = parse_pro_timestamp(stamp).ok_or_else(|| IoFormatError::BadValue {
-                    format: FORMAT,
-                    line: index + 1,
-                    what: "timestamp",
-                    text: stamp.to_string(),
-                })?;
+                let timestamp =
+                    parse_pro_timestamp(stamp).ok_or_else(|| IoFormatError::BadValue {
+                        format: FORMAT,
+                        line: index + 1,
+                        what: "timestamp",
+                        text: stamp.to_string(),
+                    })?;
                 if timesteps.iter().any(|t| t.timestamp == timestamp) {
                     return Err(IoFormatError::Duplicate {
                         what: "PRO timestamp",
@@ -168,7 +171,13 @@ impl Profiles {
             }
         }
 
-        Ok(Self { station, declared_codes, timesteps, header_lines, trailing_newline })
+        Ok(Self {
+            station,
+            declared_codes,
+            timesteps,
+            header_lines,
+            trailing_newline,
+        })
     }
 }
 

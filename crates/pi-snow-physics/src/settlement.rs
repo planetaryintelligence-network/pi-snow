@@ -80,7 +80,9 @@ impl Viscosity for Br92 {
         let rho = element.density();
         let f1 = Self::liquid_water_factor(element.composition.water);
         let f2 = Self::grain_factor(2.0 * element.micro.grain_radius);
-        f1 * f2 * Self::ETA0 * (rho / Self::C_ETA)
+        f1 * f2
+            * Self::ETA0
+            * (rho / Self::C_ETA)
             * (Self::A_ETA * (T_MELT - temperature) + Self::B_ETA * rho).exp()
     }
 }
@@ -126,7 +128,10 @@ pub fn settle(element: &mut Element, stress: f64, viscosity: f64, dt: f64) {
     c.water /= ratio;
     c.soil /= ratio;
     c.air = (1.0 - c.ice - c.water - c.soil).max(0.0);
-    debug_assert!(c.is_consistent(1e-9), "settlement broke the fractions: {c:?}");
+    debug_assert!(
+        c.is_consistent(1e-9),
+        "settlement broke the fractions: {c:?}"
+    );
     debug_assert!(c.ice * RHO_ICE <= RHO_ICE + 1e-9 && c.water * RHO_WATER >= 0.0);
 }
 

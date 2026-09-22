@@ -88,7 +88,11 @@ pub fn internal_energy(column: &Column) -> f64 {
 }
 
 fn element_temperatures(column: &Column) -> Vec<f64> {
-    column.node_temperature.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect()
+    column
+        .node_temperature
+        .windows(2)
+        .map(|w| 0.5 * (w[0] + w[1]))
+        .collect()
 }
 
 /// Advance one step with both ends held at a prescribed temperature.
@@ -97,7 +101,13 @@ fn element_temperatures(column: &Column) -> Vec<f64> {
 /// tests and by nothing else: the production upper boundary is the energy
 /// balance, because this configuration sets `CHANGE_BC = false`.
 pub fn step_dirichlet(column: &mut Column, bottom: f64, top: f64, dt: f64, k: Conductivity) {
-    solve(column, dt, k, Boundary::Dirichlet(bottom), Boundary::Dirichlet(top));
+    solve(
+        column,
+        dt,
+        k,
+        Boundary::Dirichlet(bottom),
+        Boundary::Dirichlet(top),
+    );
 }
 
 /// Advance one step with zero flux at both ends.
@@ -112,8 +122,20 @@ pub fn step_adiabatic(column: &mut Column, dt: f64, k: Conductivity) {
 ///
 /// This is the production entry point. The surface energy balance supplies the
 /// top flux and `GEO_HEAT` the bottom one. Both are positive into the snow.
-pub fn step_neumann(column: &mut Column, ground_flux: f64, surface_flux: f64, dt: f64, k: Conductivity) {
-    solve(column, dt, k, Boundary::Flux(ground_flux), Boundary::Flux(surface_flux));
+pub fn step_neumann(
+    column: &mut Column,
+    ground_flux: f64,
+    surface_flux: f64,
+    dt: f64,
+    k: Conductivity,
+) {
+    solve(
+        column,
+        dt,
+        k,
+        Boundary::Flux(ground_flux),
+        Boundary::Flux(surface_flux),
+    );
 }
 
 #[derive(Debug, Clone, Copy)]

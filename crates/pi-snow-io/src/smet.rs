@@ -117,10 +117,21 @@ impl Smet {
                     found: values.len(),
                 });
             }
-            rows.push(Row { timestamp, values, raw: line.to_string() });
+            rows.push(Row {
+                timestamp,
+                values,
+                raw: line.to_string(),
+            });
         }
 
-        Ok(Self { header, fields, nodata, rows, header_lines, trailing_newline })
+        Ok(Self {
+            header,
+            fields,
+            nodata,
+            rows,
+            header_lines,
+            trailing_newline,
+        })
     }
 
     /// Index of a named field among `values` (so, excluding the timestamp).
@@ -130,7 +141,12 @@ impl Smet {
 
     /// Value of `name` at `row`, or `None` if the field is absent or nodata.
     pub fn value(&self, row: usize, name: &str) -> Option<f64> {
-        self.rows.get(row)?.values.get(self.field_index(name)?).copied().flatten()
+        self.rows
+            .get(row)?
+            .values
+            .get(self.field_index(name)?)
+            .copied()
+            .flatten()
     }
 
     /// The whole column for `name`, nodata as `None`.

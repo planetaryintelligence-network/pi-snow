@@ -33,7 +33,12 @@ impl Composition {
     /// Dry snow of a given bulk density, with no liquid water and no soil.
     pub fn dry_snow(density: f64) -> Self {
         let ice = density / RHO_ICE;
-        Self { ice, water: 0.0, air: 1.0 - ice, soil: 0.0 }
+        Self {
+            ice,
+            water: 0.0,
+            air: 1.0 - ice,
+            soil: 0.0,
+        }
     }
 
     /// Bulk density of the mixture, kg m^-3. Air is neglected, as it is
@@ -92,7 +97,11 @@ impl Microstructure {
     /// than a NaN, because a fresh element is legitimately constructed before
     /// its radius is set.
     pub fn bond_ratio(&self) -> f64 {
-        if self.grain_radius > 0.0 { self.bond_radius / self.grain_radius } else { 0.0 }
+        if self.grain_radius > 0.0 {
+            self.bond_radius / self.grain_radius
+        } else {
+            0.0
+        }
     }
 }
 
@@ -171,7 +180,11 @@ pub struct Column {
 
 impl Column {
     /// An empty column on bare ground at a uniform temperature.
-    pub fn bare_ground(ground_temperature: f64, slope_angle_deg: f64, slope_azimuth_deg: f64) -> Self {
+    pub fn bare_ground(
+        ground_temperature: f64,
+        slope_angle_deg: f64,
+        slope_azimuth_deg: f64,
+    ) -> Self {
         Self {
             elements: Vec::new(),
             node_temperature: vec![ground_temperature],
@@ -190,17 +203,26 @@ impl Column {
     /// Snow height above the ground, m. PRO `0501` and SMET `HS_mod`, which
     /// report it in centimetres.
     pub fn snow_height(&self) -> f64 {
-        self.elements[self.soil_elements..].iter().map(|e| e.thickness).sum()
+        self.elements[self.soil_elements..]
+            .iter()
+            .map(|e| e.thickness)
+            .sum()
     }
 
     /// Snow water equivalent, kg m^-2. SMET `SWE`.
     pub fn swe(&self) -> f64 {
-        self.elements[self.soil_elements..].iter().map(|e| e.mass()).sum()
+        self.elements[self.soil_elements..]
+            .iter()
+            .map(|e| e.mass())
+            .sum()
     }
 
     /// Total liquid water in the snow, kg m^-2. SMET `MS_Water`.
     pub fn liquid_water(&self) -> f64 {
-        self.elements[self.soil_elements..].iter().map(|e| e.water_mass()).sum()
+        self.elements[self.soil_elements..]
+            .iter()
+            .map(|e| e.water_mass())
+            .sum()
     }
 
     /// Height of each element's **upper** interface above the ground, m, bottom

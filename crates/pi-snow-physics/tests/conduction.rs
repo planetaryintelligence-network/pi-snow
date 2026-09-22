@@ -46,7 +46,11 @@ fn yen_conductivity_does_not_reach_ice_at_ice_density() {
     // k_ice. That is a real property of the parameterisation, not a transcription
     // error, and the obvious "fix" of forcing it to k_ice would be wrong.
     let k = Conductivity::YenCrocus.of_density(RHO_ICE);
-    assert_relative_eq!(k, K_ICE * (RHO_ICE / RHO_WATER).powf(1.88), max_relative = 1e-12);
+    assert_relative_eq!(
+        k,
+        K_ICE * (RHO_ICE / RHO_WATER).powf(1.88),
+        max_relative = 1e-12
+    );
     assert!(k < K_ICE, "Yen form must stay below k_ice at ice density");
     // (917/1000)^1.88 = 0.84968. The derivation round's own sanity note quoted
     // "about 0.858 k_ice, about 1.97 W/m/K" for this; that is a small slip in
@@ -104,7 +108,13 @@ fn semi_infinite_step_cooling_follows_the_erf_solution() {
 
     let (dt, steps) = (60.0, 360); // six hours
     for _ in 0..steps {
-        thermal::step_dirichlet(&mut column, t_initial, t_surface, dt, Conductivity::YenCrocus);
+        thermal::step_dirichlet(
+            &mut column,
+            t_initial,
+            t_surface,
+            dt,
+            Conductivity::YenCrocus,
+        );
     }
     let elapsed = dt * steps as f64;
     let diffusion_length = (alpha * elapsed).sqrt();
@@ -151,9 +161,20 @@ fn a_closed_box_conserves_energy() {
 
     // It must actually have relaxed, or the conservation check above would pass
     // trivially on a solver that does nothing at all.
-    let spread = column.node_temperature.iter().cloned().fold(f64::MIN, f64::max)
-        - column.node_temperature.iter().cloned().fold(f64::MAX, f64::min);
-    assert!(spread < 0.01, "column should have relaxed; spread is {spread} K");
+    let spread = column
+        .node_temperature
+        .iter()
+        .cloned()
+        .fold(f64::MIN, f64::max)
+        - column
+            .node_temperature
+            .iter()
+            .cloned()
+            .fold(f64::MAX, f64::min);
+    assert!(
+        spread < 0.01,
+        "column should have relaxed; spread is {spread} K"
+    );
 
     // And it must have relaxed to the right temperature: with a uniform
     // composition, the equilibrium is the energy-weighted mean of the start.
@@ -173,7 +194,11 @@ fn volumetric_heat_capacity_matches_the_published_mixture_rule() {
     let element = &uniform_column(1, 0.1, 250.0, 268.15).elements[0];
     let ice_fraction = 250.0 / RHO_ICE;
     let expected = ice_fraction * RHO_ICE * C_ICE + (1.0 - ice_fraction) * RHO_AIR * C_AIR;
-    assert_relative_eq!(thermal::volumetric_heat_capacity(element), expected, max_relative = 1e-12);
+    assert_relative_eq!(
+        thermal::volumetric_heat_capacity(element),
+        expected,
+        max_relative = 1e-12
+    );
 }
 
 /// Abramowitz and Stegun 7.1.26, max absolute error 1.5e-7. Present only so the

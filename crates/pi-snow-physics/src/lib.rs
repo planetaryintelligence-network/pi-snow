@@ -7,5 +7,5 @@
 //! `experiments/phase-2-rust-engine-v1/citation-audit.md` for what is sourced
 //! and what is not.
 
-pub mod thermal;
 pub mod settlement;
+pub mod thermal;

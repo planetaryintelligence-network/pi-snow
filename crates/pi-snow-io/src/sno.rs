@@ -70,12 +70,14 @@ pub struct SnoFile {
 }
 
 fn header_f64(lines: &[String], key: &'static str) -> Result<f64, IoFormatError> {
-    header_str(lines, key)?.parse().map_err(|_| IoFormatError::BadValue {
-        format: FORMAT,
-        line: 0,
-        what: "header number",
-        text: key.to_string(),
-    })
+    header_str(lines, key)?
+        .parse()
+        .map_err(|_| IoFormatError::BadValue {
+            format: FORMAT,
+            line: 0,
+            what: "header number",
+            text: key.to_string(),
+        })
 }
 
 fn header_str<'a>(lines: &'a [String], key: &'static str) -> Result<&'a str, IoFormatError> {
@@ -85,7 +87,10 @@ fn header_str<'a>(lines: &'a [String], key: &'static str) -> Result<&'a str, IoF
             let (k, v) = l.split_once('=')?;
             (k.trim() == key).then(|| v.trim())
         })
-        .ok_or(IoFormatError::MissingHeader { format: FORMAT, key })
+        .ok_or(IoFormatError::MissingHeader {
+            format: FORMAT,
+            key,
+        })
 }
 
 impl SnoFile {
@@ -117,7 +122,9 @@ impl SnoFile {
             station_id: header_str(&header_lines, "station_id")?.to_string(),
             slope_angle_deg: header_f64(&header_lines, "SlopeAngle")?,
             slope_azimuth_deg: header_f64(&header_lines, "SlopeAzi")?,
-            profile_date: header_str(&header_lines, "ProfileDate").ok().and_then(parse_timestamp),
+            profile_date: header_str(&header_lines, "ProfileDate")
+                .ok()
+                .and_then(parse_timestamp),
             hs_last: header_f64(&header_lines, "HS_Last")?,
             soil_layer_count: header_f64(&header_lines, "nSoilLayerData")? as usize,
             layers,
@@ -134,7 +141,11 @@ impl SnoFile {
     /// interfaces, with the bottom node set from the lowest layer, since the file
     /// records element temperatures and the engine solves on nodes.
     pub fn to_column(&self) -> Column {
-        let ground = self.layers.first().map(|l| l.temperature).unwrap_or(pi_snow_core::constants::T_MELT);
+        let ground = self
+            .layers
+            .first()
+            .map(|l| l.temperature)
+            .unwrap_or(pi_snow_core::constants::T_MELT);
         let mut column = Column::bare_ground(ground, self.slope_angle_deg, self.slope_azimuth_deg);
         column.soil_elements = self.soil_layer_count;
         let mut nodes = vec![ground];

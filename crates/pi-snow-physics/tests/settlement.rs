@@ -92,7 +92,11 @@ fn constant_viscosity_gives_exact_exponential_compaction() {
         settlement::settle(&mut e, sigma, eta, dt);
     }
     let t = dt * steps as f64;
-    assert_relative_eq!(e.thickness, h0 * (sigma * t / eta).exp(), max_relative = 1e-10);
+    assert_relative_eq!(
+        e.thickness,
+        h0 * (sigma * t / eta).exp(),
+        max_relative = 1e-10
+    );
     assert_relative_eq!(e.mass(), m0, max_relative = 1e-12);
 }
 
@@ -126,9 +130,16 @@ fn br92_grain_factor_is_capped_at_four() {
     // g3 = 0.1 mm (Vionnet et al. 2012, Eq. 9). The inner min caps the
     // exponent at 4, and exp(4) is well above the outer cap of 4.
     assert_relative_eq!(Br92::grain_factor(0.2e-3), 1.0, max_relative = 1e-12);
-    assert_relative_eq!(Br92::grain_factor(0.3e-3), 1.0_f64.exp(), max_relative = 1e-12);
+    assert_relative_eq!(
+        Br92::grain_factor(0.3e-3),
+        1.0_f64.exp(),
+        max_relative = 1e-12
+    );
     assert_relative_eq!(Br92::grain_factor(5.0e-3), 4.0);
-    assert!(Br92::grain_factor(0.1e-3) < 1.0, "small grains settle faster");
+    assert!(
+        Br92::grain_factor(0.1e-3) < 1.0,
+        "small grains settle faster"
+    );
 }
 
 #[test]
@@ -141,6 +152,9 @@ fn br92_viscosity_rises_with_density_and_with_cold() {
         let eta = Br92.viscosity(&e(rho), warm);
         assert!(eta > previous, "viscosity must increase with density");
         previous = eta;
-        assert!(Br92.viscosity(&e(rho), cold) > eta, "colder snow is stiffer");
+        assert!(
+            Br92.viscosity(&e(rho), cold) > eta,
+            "colder snow is stiffer"
+        );
     }
 }

@@ -143,3 +143,37 @@ fn reported_longwave_terms_are_consistent() {
     assert_relative_eq!(b.olwr, olwr, max_relative = 1e-12);
     assert_relative_eq!(b.lwr_net, 220.0 - olwr, max_relative = 1e-12);
 }
+
+#[test]
+fn absorbed_shortwave_inside_the_pack_is_conserved() {
+    // Sources inside elements add exactly their energy: the internal-energy
+    // change equals boundary fluxes plus the summed sources.
+    let mut c = column(10, 0.03, 200.0, 263.15);
+    let atm = Atmosphere {
+        wind: 2.0,
+        t_air: 262.0,
+        ilwr: 230.0,
+        ..calm(230.0)
+    };
+    let sources: Vec<f64> = (0..10).map(|i| if i >= 7 { 20.0 } else { 0.0 }).collect();
+    let (ground, dt) = (0.06, 600.0);
+    let before = thermal::internal_energy(&c);
+    let mut injected = 0.0;
+    for _ in 0..48 {
+        let b = surface::step_with_sources(
+            &mut c,
+            &atm,
+            &params(),
+            ground,
+            &sources,
+            dt,
+            Conductivity::Yen1981,
+        );
+        injected += (b.total + ground + sources.iter().sum::<f64>()) * dt;
+    }
+    assert_relative_eq!(
+        thermal::internal_energy(&c) - before,
+        injected,
+        max_relative = 1e-6
+    );
+}

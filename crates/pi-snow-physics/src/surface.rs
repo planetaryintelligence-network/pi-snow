@@ -132,6 +132,20 @@ pub fn step(
     dt: f64,
     k: Conductivity,
 ) -> Budget {
+    step_with_sources(column, atm, p, ground_flux, &[], dt, k)
+}
+
+/// As [`step`], with shortwave (or any heat) absorbed inside the elements, W
+/// m^-2, bottom element first.
+pub fn step_with_sources(
+    column: &mut Column,
+    atm: &Atmosphere,
+    p: &SurfaceParameters,
+    ground_flux: f64,
+    sources: &[f64],
+    dt: f64,
+    k: Conductivity,
+) -> Budget {
     if column.elements.is_empty() {
         return budget(atm, p, column.node_temperature[0]);
     }
@@ -141,7 +155,15 @@ pub fn step(
     for _ in 0..3 {
         column.node_temperature.clone_from(&start);
         used = linearise(atm, p, t_lin);
-        thermal::step_surface_linear(column, ground_flux, used.0, used.1, dt, k);
+        thermal::step_surface_linear_with_sources(
+            column,
+            ground_flux,
+            used.0,
+            used.1,
+            sources,
+            dt,
+            k,
+        );
         t_lin = *column.node_temperature.last().unwrap();
     }
     // Report the flux the last solve imposed, a + b T_end, rather than the

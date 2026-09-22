@@ -168,12 +168,29 @@ pub fn step_surface_linear(
     dt: f64,
     k: Conductivity,
 ) {
-    solve(
+    step_surface_linear_with_sources(column, ground_flux, a, b, &[], dt, k);
+}
+
+/// As [`step_surface_linear`], with a heat source in each element (W m^-2,
+/// bottom element first), such as absorbed shortwave. Each element's source is
+/// split equally between its two nodes, the same lumping as the capacitance.
+/// An empty slice means no sources.
+pub fn step_surface_linear_with_sources(
+    column: &mut Column,
+    ground_flux: f64,
+    a: f64,
+    b: f64,
+    sources: &[f64],
+    dt: f64,
+    k: Conductivity,
+) {
+    solve_with_sources(
         column,
         dt,
         k,
         Boundary::Flux(ground_flux),
         Boundary::Linear { a, b },
+        sources,
     );
 }
 
@@ -199,6 +216,17 @@ enum Boundary {
 /// exception. It also keeps the system tridiagonal, which the Thomas algorithm
 /// below solves in O(n).
 fn solve(column: &mut Column, dt: f64, k: Conductivity, bottom: Boundary, top: Boundary) {
+    solve_with_sources(column, dt, k, bottom, top, &[]);
+}
+
+fn solve_with_sources(
+    column: &mut Column,
+    dt: f64,
+    k: Conductivity,
+    bottom: Boundary,
+    top: Boundary,
+    sources: &[f64],
+) {
     let n = column.elements.len();
     if n == 0 {
         return;
@@ -224,6 +252,11 @@ fn solve(column: &mut Column, dt: f64, k: Conductivity, bottom: Boundary, top: B
         diag[index + 1] += conductance + half_capacity;
         sub[index + 1] -= conductance;
         rhs[index + 1] += half_capacity * column.node_temperature[index + 1];
+    }
+
+    for (index, source) in sources.iter().enumerate() {
+        rhs[index] += 0.5 * source;
+        rhs[index + 1] += 0.5 * source;
     }
 
     apply(&mut sub, &mut diag, &mut sup, &mut rhs, 0, bottom);

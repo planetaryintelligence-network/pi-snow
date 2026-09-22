@@ -11,6 +11,7 @@ pub mod atmosphere;
 pub mod settlement;
 pub mod solar;
 pub mod stability;
+pub mod surface;
 pub mod thermal;
 pub mod turbulence;
 pub mod water;

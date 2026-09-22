@@ -156,11 +156,37 @@ pub fn step_neumann(
     );
 }
 
+/// Advance one step with the geothermal flux at the bottom and, at the top, a
+/// flux that depends linearly on the new surface temperature,
+/// `F = a + b T_surface` (W m^-2, into the snow, `b <= 0`). Used by the
+/// surface energy balance, which linearises itself about the current state.
+pub fn step_surface_linear(
+    column: &mut Column,
+    ground_flux: f64,
+    a: f64,
+    b: f64,
+    dt: f64,
+    k: Conductivity,
+) {
+    solve(
+        column,
+        dt,
+        k,
+        Boundary::Flux(ground_flux),
+        Boundary::Linear { a, b },
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Boundary {
     Dirichlet(f64),
     /// W m^-2, positive into the snow.
     Flux(f64),
+    /// `a + b T` W m^-2 at the boundary node, evaluated implicitly.
+    Linear {
+        a: f64,
+        b: f64,
+    },
 }
 
 /// Assemble and solve one backward-Euler step.
@@ -226,6 +252,11 @@ fn apply(
         // A Neumann condition is a load on the boundary node; the row already
         // carries the correct capacitance and conductance from assembly.
         Boundary::Flux(flux) => rhs[node] += flux,
+        // Implicit in T: the b T part moves to the left-hand side.
+        Boundary::Linear { a, b } => {
+            rhs[node] += a;
+            diag[node] -= b;
+        }
     }
 }
 

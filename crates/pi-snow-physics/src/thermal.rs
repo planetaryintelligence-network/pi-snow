@@ -194,6 +194,36 @@ pub fn step_surface_linear_with_sources(
     );
 }
 
+/// The lower boundary of a step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Ground {
+    /// A prescribed flux into the snow, W m^-2 (`GEO_HEAT`).
+    Flux(f64),
+    /// A prescribed ground temperature, K. The reference behaves as if its
+    /// lower boundary were held at the forcing's `TSG` (lab notes): its bottom
+    /// element never rises above 0 C and averages -0.04 to -0.09 C under a
+    /// surface at -14 to -34 C, which a 0.06 W m^-2 flux could not produce.
+    Temperature(f64),
+}
+
+/// Advance one step with a chosen lower boundary, the linear surface flux
+/// `a + b T` on top, and per-element heat sources (W m^-2).
+pub fn step_general(
+    column: &mut Column,
+    ground: Ground,
+    a: f64,
+    b: f64,
+    sources: &[f64],
+    dt: f64,
+    k: Conductivity,
+) {
+    let bottom = match ground {
+        Ground::Flux(f) => Boundary::Flux(f),
+        Ground::Temperature(t) => Boundary::Dirichlet(t),
+    };
+    solve_with_sources(column, dt, k, bottom, Boundary::Linear { a, b }, sources);
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Boundary {
     Dirichlet(f64),

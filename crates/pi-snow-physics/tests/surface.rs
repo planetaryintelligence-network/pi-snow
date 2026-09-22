@@ -177,3 +177,39 @@ fn absorbed_shortwave_inside_the_pack_is_conserved() {
         max_relative = 1e-6
     );
 }
+
+#[test]
+fn a_fixed_ground_temperature_holds_the_bottom_node_and_its_flux_closes_the_budget() {
+    // With the ground held at 273.15 K under a cold night, the bottom node
+    // stays there, heat flows up out of the ground, and the ground flux, taken
+    // as the energy residual, is positive (into the snow) and closes exactly.
+    use pi_snow_physics::thermal::Ground;
+    let mut c = column(15, 0.02, 200.0, 268.0);
+    let atm = Atmosphere {
+        wind: 3.0,
+        t_air: 255.0,
+        ilwr: 170.0,
+        ..calm(170.0)
+    };
+    let dt = 600.0;
+    let mut ground_total = 0.0;
+    for _ in 0..144 {
+        let before = thermal::internal_energy(&c);
+        let b = surface::step_general(
+            &mut c,
+            &atm,
+            &params(),
+            Ground::Temperature(273.15),
+            &[],
+            dt,
+            Conductivity::Yen1981,
+        );
+        let qg0 = (thermal::internal_energy(&c) - before) / dt - b.total;
+        ground_total += qg0;
+        assert_relative_eq!(c.node_temperature[0], 273.15, epsilon = 1e-9);
+    }
+    assert!(
+        ground_total > 0.0,
+        "a warm ground must heat the cold snow from below"
+    );
+}

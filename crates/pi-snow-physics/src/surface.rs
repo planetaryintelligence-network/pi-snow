@@ -25,7 +25,7 @@ use pi_snow_core::Column;
 use pi_snow_core::constants::{C_WATER, LH_SUBLIMATION, LH_VAPORISATION, STEFAN_BOLTZMANN, T_MELT};
 
 use crate::atmosphere::{specific_humidity, vapour_pressure_ice, vapour_pressure_water};
-use crate::thermal::{self, Conductivity};
+use crate::thermal::{self, Conductivity, Ground};
 use crate::turbulence::{self, Scheme, SurfaceLayer};
 
 /// All-wave emissivity of snow: the midpoint of Dozier and Warren's
@@ -169,6 +169,34 @@ pub fn step_with_sources(
     // Report the flux the last solve imposed, a + b T_end, rather than the
     // nonlinear budget at T_end: the two differ by the linearisation error, and
     // only the former balances the energy the solver actually added.
+    let mut report = budget(atm, p, t_lin);
+    report.total = used.0 + used.1 * t_lin;
+    report
+}
+
+/// As [`step_with_sources`] with any lower boundary. Returns the surface budget
+/// the solver imposed.
+pub fn step_general(
+    column: &mut Column,
+    atm: &Atmosphere,
+    p: &SurfaceParameters,
+    ground: Ground,
+    sources: &[f64],
+    dt: f64,
+    k: Conductivity,
+) -> Budget {
+    if column.elements.is_empty() {
+        return budget(atm, p, column.node_temperature[0]);
+    }
+    let start = column.node_temperature.clone();
+    let mut t_lin = *start.last().unwrap();
+    let mut used = (0.0, 0.0);
+    for _ in 0..3 {
+        column.node_temperature.clone_from(&start);
+        used = linearise(atm, p, t_lin);
+        thermal::step_general(column, ground, used.0, used.1, sources, dt, k);
+        t_lin = *column.node_temperature.last().unwrap();
+    }
     let mut report = budget(atm, p, t_lin);
     report.total = used.0 + used.1 * t_lin;
     report

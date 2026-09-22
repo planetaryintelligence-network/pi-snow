@@ -359,6 +359,7 @@ dependencies = [
  "pi-snow-core",
  "pi-snow-io",
  "pi-snow-physics",
+ "thiserror",
 ]
 
 [[package]]

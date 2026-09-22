@@ -14,5 +14,6 @@ pi-snow-core.workspace = true
 pi-snow-io.workspace = true
 pi-snow-physics.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 clap.workspace = true
 chrono.workspace = true

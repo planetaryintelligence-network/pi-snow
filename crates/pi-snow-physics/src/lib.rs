@@ -8,5 +8,6 @@
 //! and what is not.
 
 pub mod settlement;
+pub mod solar;
 pub mod thermal;
 pub mod water;

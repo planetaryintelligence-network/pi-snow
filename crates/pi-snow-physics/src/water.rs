@@ -99,7 +99,7 @@ fn node_capacities(column: &Column) -> Vec<f64> {
 }
 
 /// Sensible energy held by each node relative to the melting point, J m^-2.
-fn node_energies(column: &Column) -> Vec<f64> {
+pub(crate) fn node_energies(column: &Column) -> Vec<f64> {
     node_capacities(column)
         .iter()
         .zip(&column.node_temperature)
@@ -108,7 +108,7 @@ fn node_energies(column: &Column) -> Vec<f64> {
 }
 
 /// Set node temperatures from energies and the current capacities.
-fn set_temperatures_from_energies(column: &mut Column, energies: &[f64]) {
+pub(crate) fn set_temperatures_from_energies(column: &mut Column, energies: &[f64]) {
     let capacities = node_capacities(column);
     for ((t, u), k) in column
         .node_temperature

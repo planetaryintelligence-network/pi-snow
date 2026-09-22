@@ -183,3 +183,159 @@ pub fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
     }
     None
 }
+
+// ---------------------------------------------------------------------------
+// Writing the output time series from scratch
+// ---------------------------------------------------------------------------
+
+/// The 68 data fields of the reference output time series, in the reference's
+/// order. The feature extractor reads by name, but the order is kept so a file
+/// diff against the reference lines up column for column.
+pub const OUTPUT_FIELDS: [&str; 68] = [
+    "Qs",
+    "Ql",
+    "Qg",
+    "TSG",
+    "Qg0",
+    "Qr",
+    "dIntEnergySnow",
+    "meltFreezeEnergySnow",
+    "ColdContentSnow",
+    "OLWR",
+    "ILWR",
+    "LWR_net",
+    "OSWR",
+    "ISWR",
+    "Qw",
+    "pAlbedo",
+    "mAlbedo",
+    "ISWR_h",
+    "ISWR_dir",
+    "ISWR_diff",
+    "TA",
+    "TSS_mod",
+    "TSS_meas",
+    "T_bottom",
+    "RH",
+    "VW",
+    "VW_drift",
+    "DW",
+    "MS_Snow",
+    "HS_mod",
+    "HS_meas",
+    "hoar_size",
+    "wind_trans24",
+    "HN3",
+    "HN6",
+    "HN12",
+    "HN24",
+    "HN72_24",
+    "PSUM24",
+    "ski_pen",
+    "SWE",
+    "MS_Water",
+    "MS_Water_Soil",
+    "MS_Ice_Soil",
+    "MS_Wind",
+    "MS_Rain",
+    "MS_SN_Runoff",
+    "MS_Surface_Mass_Flux",
+    "MS_Soil_Runoff",
+    "MS_Sublimation",
+    "MS_Evap",
+    "TS0",
+    "TS1",
+    "TS2",
+    "TS3",
+    "TS4",
+    "Sclass1",
+    "Sclass2",
+    "zSd",
+    "Sd",
+    "zSn",
+    "Sn",
+    "zSs",
+    "Ss",
+    "zS4",
+    "S4",
+    "zS5",
+    "S5",
+];
+
+/// The reference file's unit transforms, one per field including the timestamp.
+/// They state that temperatures are written in degrees Celsius (offset 273.15
+/// back to kelvin) and heights in centimetres (multiplier 0.01 back to metres).
+/// The feature extractor ignores them and reads the display values as written,
+/// which is why the engine must write display units, not SI.
+const UNITS_OFFSET: &str = "0 0 0 0 273.15 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 273.15 273.15 273.15 273.15 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 273.15 273.15 273.15 273.15 273.15 0 0 0 0 0 0 0 0 0 0 0 0";
+const UNITS_MULTIPLIER: &str = "1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0.01 1 1 1 1 0.01 0.01 0.001 0.01 0.01 0.01 0.01 0.01 0.01 0.001 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1";
+
+/// One output row: a timestamp and the 68 values, nodata where unset.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputRow {
+    pub timestamp: DateTime<Utc>,
+    values: [Option<f64>; 68],
+}
+
+impl OutputRow {
+    pub fn nodata(timestamp: DateTime<Utc>) -> Self {
+        Self {
+            timestamp,
+            values: [None; 68],
+        }
+    }
+
+    /// Set a field by name. Panics on an unknown name, deliberately: a typo in a
+    /// field name would otherwise write a silent column of nodata.
+    pub fn set(&mut self, name: &str, value: f64) {
+        let index = OUTPUT_FIELDS
+            .iter()
+            .position(|f| *f == name)
+            .unwrap_or_else(|| panic!("unknown output field {name:?}"));
+        self.values[index] = Some(value);
+    }
+}
+
+/// Write a complete output time series file.
+#[allow(clippy::too_many_arguments)]
+pub fn write_output_smet(
+    station_id: &str,
+    station_name: &str,
+    latitude: f64,
+    longitude: f64,
+    altitude: f64,
+    slope_angle_deg: f64,
+    slope_azimuth_deg: f64,
+    rows: &[OutputRow],
+) -> String {
+    let mut out = String::from("SMET 1.1 ASCII\n[HEADER]\n");
+    let mut kv = |k: &str, v: String| out.push_str(&format!("{k:<16} = {v}\n"));
+    kv("station_id", station_id.to_string());
+    kv("station_name", station_name.to_string());
+    kv("latitude", format!("{latitude:.6}"));
+    kv("longitude", format!("{longitude:.6}"));
+    kv("altitude", format!("{altitude:.1}"));
+    kv("nodata", "-999".to_string());
+    kv("tz", "0".to_string());
+    kv("units_offset", UNITS_OFFSET.to_string());
+    kv("units_multiplier", UNITS_MULTIPLIER.to_string());
+    kv("slope_angle", format!("{slope_angle_deg}"));
+    kv("slope_azi", format!("{slope_azimuth_deg}"));
+    kv("fields", format!("timestamp {}", OUTPUT_FIELDS.join(" ")));
+    kv(
+        "creator_name",
+        format!("pi-snow {}", env!("CARGO_PKG_VERSION")),
+    );
+    out.push_str("[DATA]\n");
+    for row in rows {
+        out.push_str(&row.timestamp.format("%Y-%m-%dT%H:%M:%S").to_string());
+        for v in &row.values {
+            match v {
+                Some(x) => out.push_str(&format!(" {x:>8.3}")),
+                None => out.push_str("     -999"),
+            }
+        }
+        out.push('\n');
+    }
+    out
+}

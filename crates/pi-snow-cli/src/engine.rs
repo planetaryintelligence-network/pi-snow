@@ -20,6 +20,7 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
+use pi_snow_core::options::S5Index;
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
@@ -367,7 +368,7 @@ pub fn run_with_options(
         let on_the_hour = t.minute() == 0 && t.second() == 0;
         if first_output || on_the_hour {
             first_output = false;
-            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg));
+            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
             pro_text.push_str(&pro::write_timestep(&profile(t, &column)));
             acc = Accum::default();
         }
@@ -407,6 +408,7 @@ fn output_row(
     vw: f64,
     dw: f64,
     tsg: f64,
+    options: &PhysicsOptions,
 ) -> OutputRow {
     let n = a.n.max(1.0);
     let mut r = OutputRow::nodata(t);
@@ -480,6 +482,20 @@ fn output_row(
         let (value, height) = minimum(f);
         r.set(s, value);
         r.set(z, 100.0 * height);
+    }
+    match options.s5 {
+        S5Index::None => {}
+        S5Index::LwcIndexMitterer2013 => {
+            // Nodata on bare ground and zS5 = 0 on every row are the
+            // reference's output conventions, copied, not derived.
+            r.set("zS5", 0.0);
+            let snow = &c.elements[c.soil_elements..];
+            if let Some(index) =
+                stability::lwc_index(snow.iter().map(|e| (e.thickness, e.composition.water)))
+            {
+                r.set("S5", index);
+            }
+        }
     }
     r
 }

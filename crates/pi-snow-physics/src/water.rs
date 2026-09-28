@@ -39,6 +39,7 @@
 
 use pi_snow_core::Column;
 use pi_snow_core::constants::{LH_FUSION, RHO_ICE, RHO_WATER, T_MELT};
+use pi_snow_core::options::WaterRetention;
 
 use crate::thermal::volumetric_heat_capacity;
 
@@ -75,6 +76,85 @@ pub fn holding_capacity(ice_fraction: f64) -> f64 {
         0.0
     };
     theta.clamp(0.0, (1.0 - ice_fraction).max(0.0))
+}
+
+/// Porosity range of a Coleou and Lesaffre (1998) regression, as P/(1-P).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PorosityRange {
+    pub low: f64,
+    pub high: f64,
+}
+
+/// P/(1-P) spanned by Coleou and Lesaffre's (1998) 37 measurements (Table 1:
+/// dry density from the wet density and liquid-water content, rho_i 917 kg
+/// m^-3), 0.644 at 558 kg m^-3 to 2.278 at 280 kg m^-3; their Fig. 4 shows
+/// the same span.
+pub const CL98_MEASURED: PorosityRange = PorosityRange {
+    low: 0.644,
+    high: 2.278,
+};
+
+/// The narrower range P/(1-P) 0.9 to 1.8, which is where the paper's two
+/// worked examples sit (7 % and 12 % of mass), not the span of its data.
+pub const CL98_NARROW: PorosityRange = PorosityRange {
+    low: 0.9,
+    high: 1.8,
+};
+
+/// Irreducible water as a fraction of wet mass, Coleou and Lesaffre (1998,
+/// Ann. Glaciol. 26, 64-68), the regression of their Fig. 4:
+/// `W_mi = 0.0571 P/(1-P) + 0.017`, with `P` the porosity.
+///
+/// The scanned text and the publisher's HTML both misprint the coefficient
+/// ("0.00571 (1 - P)", "0.0057/(1 - P)"). Only `0.0571 P/(1-P)` reproduces
+/// the paper's own checks (about 7 % of mass at P/(1-P) 0.9, 12 % at 1.8) and
+/// its Table 1 (a least-squares refit gives 0.0566 and 0.0173).
+pub fn cl98_mass_fraction(pore_to_ice: f64) -> f64 {
+    0.0571 * pore_to_ice + 0.017
+}
+
+/// The regression's share of pore volume at P/(1-P) = `x`: the paper's
+/// `W_p = W_m / (P/(1-P)) (d_i/d_w) / (1 - W_m)`, which also fixes `W_m` as a
+/// fraction of wet mass (its example, P = 0.5 gives W_pi = 7.3 %, holds only
+/// so).
+pub fn cl98_pore_share(pore_to_ice: f64) -> f64 {
+    let w = cl98_mass_fraction(pore_to_ice);
+    w / (1.0 - w) * (RHO_ICE / RHO_WATER) / pore_to_ice
+}
+
+/// Irreducible water content as a volumetric fraction, from Coleou and
+/// Lesaffre (1998). Inside `range` the regression, converted to volume as
+/// `theta_w = W/(1-W) (rho_i/rho_w) theta_i`; outside it a constant share of
+/// pore volume, the regression's share at the nearer end, so the form is
+/// continuous. Extrapolating the regression instead climbs to 11 to 12 % of
+/// pore volume at both extremes, outside the 6.5 to 8.5 % the paper reports;
+/// a constant share outside is the choice Colbeck (1974), whom the paper
+/// cites, supports. That outside rule is ours.
+pub fn holding_capacity_cl98(ice_fraction: f64, range: PorosityRange) -> f64 {
+    if ice_fraction <= 0.0 {
+        return cl98_pore_share(range.high);
+    }
+    let pores = (1.0 - ice_fraction).max(0.0);
+    let x = pores / ice_fraction;
+    if x > range.high {
+        cl98_pore_share(range.high) * pores
+    } else if x < range.low {
+        cl98_pore_share(range.low) * pores
+    } else {
+        let w = cl98_mass_fraction(x);
+        w / (1.0 - w) * (RHO_ICE / RHO_WATER) * ice_fraction
+    }
+}
+
+/// Holding capacity under the chosen retention law.
+pub fn capacity(retention: WaterRetention, ice_fraction: f64) -> f64 {
+    match retention {
+        WaterRetention::Wever2014Printed => holding_capacity(ice_fraction),
+        WaterRetention::ColeouLesaffre1998 => holding_capacity_cl98(ice_fraction, CL98_MEASURED),
+        WaterRetention::ColeouLesaffre1998Narrow => {
+            holding_capacity_cl98(ice_fraction, CL98_NARROW)
+        }
+    }
 }
 
 /// What one call to [`phase_change`] did, in kg m^-2.
@@ -254,6 +334,11 @@ fn remove_melted_out(column: &mut Column, energies: &mut Vec<f64>) -> f64 {
 /// Nodal sensible energy is preserved, so a node that gains water moves toward
 /// the melting point, which is what adding water at the melting point should do.
 pub fn cascade(column: &mut Column) -> f64 {
+    cascade_with(column, WaterRetention::Wever2014Printed)
+}
+
+/// [`cascade`] with the holding capacity of the chosen retention law.
+pub fn cascade_with(column: &mut Column, retention: WaterRetention) -> f64 {
     if column.elements.is_empty() {
         return 0.0;
     }
@@ -263,7 +348,7 @@ pub fn cascade(column: &mut Column) -> f64 {
         let thickness = element.thickness;
         let c = &mut element.composition;
         c.water += carry / (RHO_WATER * thickness);
-        let capacity = holding_capacity(c.ice);
+        let capacity = capacity(retention, c.ice);
         carry = if c.water > capacity {
             let excess = (c.water - capacity) * RHO_WATER * thickness;
             c.water = capacity;

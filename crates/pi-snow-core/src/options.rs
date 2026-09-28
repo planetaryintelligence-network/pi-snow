@@ -15,6 +15,12 @@ pub enum WaterRetention {
     /// Wever et al. (2014) eq. 1 as printed, clamped at the pore volume (Phase 2).
     #[default]
     Wever2014Printed,
+    /// Coleou and Lesaffre (1998): their regression over the porosity range
+    /// their samples span, a constant share of pore volume outside it.
+    ColeouLesaffre1998,
+    /// The same regression over the narrower range P/(1-P) 0.9 to 1.8 once
+    /// proposed for it (sensitivity arm of engine-mass-v1).
+    ColeouLesaffre1998Narrow,
 }
 
 /// Mapping of microstructure onto the Swiss grain code.
@@ -62,6 +68,8 @@ impl PhysicsOptions {
             "WATER_RETENTION" => {
                 self.water_retention = match value {
                     "WEVER2014_PRINTED" => WaterRetention::Wever2014Printed,
+                    "COLEOU_LESAFFRE_1998" => WaterRetention::ColeouLesaffre1998,
+                    "COLEOU_LESAFFRE_1998_NARROW" => WaterRetention::ColeouLesaffre1998Narrow,
                     _ => return Err(bad()),
                 }
             }

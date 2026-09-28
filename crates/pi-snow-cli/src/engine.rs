@@ -285,7 +285,7 @@ pub fn run_with_options(
                     }
                 }
             }
-            acc.runoff += pc.drained + water::cascade(&mut column);
+            acc.runoff += pc.drained + water::cascade_with(&mut column, options.water_retention);
 
             // 6. Sublimation or deposition on the top element.
             let vapour = b.vapour_mass * dt;

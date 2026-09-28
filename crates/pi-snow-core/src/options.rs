@@ -133,7 +133,10 @@ mod tests {
         let o = PhysicsOptions::from_settings(["S5=LWC_INDEX_MITTERER2013"]).unwrap();
         assert_eq!(o.s5, S5Index::LwcIndexMitterer2013);
         assert_eq!(
-            PhysicsOptions { s5: S5Index::None, ..o },
+            PhysicsOptions {
+                s5: S5Index::None,
+                ..o
+            },
             PhysicsOptions::default(),
             "only the S5 key changes"
         );

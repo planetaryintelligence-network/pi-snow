@@ -404,3 +404,24 @@ pub fn lwc_index(layers: impl IntoIterator<Item = (f64, f64)>) -> Option<f64> {
         .fold((0.0, 0.0), |(d, w), (h, theta_w)| (d + h, w + h * theta_w));
     (depth > 0.0).then(|| water / (LWC_INDEX_THRESHOLD * depth))
 }
+
+/// The smallest snow height the SMET output shows as non-zero, m: half of the
+/// 0.001 cm `HS_mod` is written to. Below it the written height reads 0.000.
+pub const HS_REPORTED_MIN_M: f64 = 5e-6;
+
+/// [`lwc_index`] as the output reports it: nodata wherever the written snow
+/// height is 0, the reference's convention (it writes `S5` nodata exactly when
+/// its `HS_mod` is 0). Without this, a trace thinner than the output shows
+/// would carry an index over a vanishing thickness (values up to 20 were seen;
+/// experiments/engine-s5-danger-v1/plan.md, amendment 1). Interface-derived,
+/// not physics.
+pub fn reported_lwc_index(
+    layers: impl IntoIterator<Item = (f64, f64)>,
+    snow_height_m: f64,
+) -> Option<f64> {
+    if snow_height_m < HS_REPORTED_MIN_M {
+        None
+    } else {
+        lwc_index(layers)
+    }
+}

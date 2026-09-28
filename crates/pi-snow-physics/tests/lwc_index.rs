@@ -56,3 +56,18 @@ fn no_snow_has_no_index() {
     assert_eq!(lwc_index(std::iter::empty()), None);
     assert_eq!(lwc_index([(0.0, 0.0)]), None);
 }
+
+#[test]
+fn a_trace_below_the_written_resolution_has_no_index() {
+    // Amendment 1: SMET writes HS to 0.001 cm, so a trace under 5e-6 m reads
+    // as bare ground and gets nodata, as the reference writes it there.
+    use pi_snow_physics::stability::{HS_REPORTED_MIN_M, reported_lwc_index};
+    assert_eq!(HS_REPORTED_MIN_M, 5e-6);
+    assert_eq!(reported_lwc_index([(4e-6, 0.3)], 4e-6), None);
+    assert_eq!(reported_lwc_index([(-1e-12, 0.0)], -1e-12), None);
+    assert_relative_eq!(
+        reported_lwc_index([(5e-6, 0.03)], 5e-6).unwrap(),
+        1.0,
+        epsilon = 1e-9
+    );
+}

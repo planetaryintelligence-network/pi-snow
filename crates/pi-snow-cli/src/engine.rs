@@ -490,9 +490,10 @@ fn output_row(
             // reference's output conventions, copied, not derived.
             r.set("zS5", 0.0);
             let snow = &c.elements[c.soil_elements..];
-            if let Some(index) =
-                stability::lwc_index(snow.iter().map(|e| (e.thickness, e.composition.water)))
-            {
+            if let Some(index) = stability::reported_lwc_index(
+                snow.iter().map(|e| (e.thickness, e.composition.water)),
+                c.snow_height(),
+            ) {
                 r.set("S5", index);
             }
         }

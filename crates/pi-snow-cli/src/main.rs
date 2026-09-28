@@ -1,12 +1,17 @@
 //! `pi-snow -c <ini> -e <YYYY-MM-DDTHH:MM>`, the same invocation the pipeline
 //! uses for the reference engine. Paths in the INI are relative to the INI's
 //! directory, which is also the working directory the pipeline sets.
+//!
+//! `--physics KEY=VALUE` (repeatable) selects a labelled physics variant; with
+//! none given the engine is exactly the Phase 2 engine. See
+//! `pi_snow_core::options`.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use pi_snow_cli::engine::{self, Site};
+use pi_snow_core::PhysicsOptions;
 use pi_snow_io::ini::{Ini, RunConfig};
 use pi_snow_io::smet::Smet;
 use pi_snow_io::sno::SnoFile;
@@ -24,6 +29,12 @@ fn main() -> Result<()> {
     let end: DateTime<Utc> = NaiveDateTime::parse_from_str(&end_text, "%Y-%m-%dT%H:%M")
         .with_context(|| format!("bad end time {end_text:?}"))?
         .and_utc();
+
+    let physics = PhysicsOptions::from_settings(
+        args.windows(2)
+            .filter(|w| w[0] == "--physics")
+            .map(|w| w[1].as_str()),
+    )?;
 
     let root = ini_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let cfg = RunConfig::from_ini(&Ini::parse(&std::fs::read_to_string(&ini_path)?)?)?;
@@ -57,7 +68,7 @@ fn main() -> Result<()> {
     };
 
     let started = std::time::Instant::now();
-    let out = engine::run(&cfg, &site, &forcing, sno.to_column(), end)?;
+    let out = engine::run_with_options(&cfg, &physics, &site, &forcing, sno.to_column(), end)?;
     let output = root.join(&cfg.output_path);
     std::fs::create_dir_all(&output)?;
     let stem = output.join(format!("{}_{}", cfg.station_id, cfg.experiment));

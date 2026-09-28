@@ -10,6 +10,8 @@
 //! `experiments/phase-2-rust-engine-v1/plan.md`.
 
 pub mod constants;
+pub mod options;
 pub mod state;
 
+pub use options::PhysicsOptions;
 pub use state::{Column, Composition, Element, Microstructure};

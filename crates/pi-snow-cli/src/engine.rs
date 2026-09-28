@@ -20,7 +20,7 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
-use pi_snow_core::{Column, Element};
+use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
 use pi_snow_io::smet::{OutputRow, Smet};
@@ -103,6 +103,18 @@ struct Accum {
 
 pub fn run(
     cfg: &RunConfig,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+) -> Result<RunOutput, RunError> {
+    run_with_options(cfg, &PhysicsOptions::default(), site, forcing, start, end)
+}
+
+/// `run` with physics chosen by `--physics`; the default options are Phase 2.
+pub fn run_with_options(
+    cfg: &RunConfig,
+    #[allow(unused_variables)] options: &PhysicsOptions,
     site: &Site,
     forcing: &Smet,
     start: Column,

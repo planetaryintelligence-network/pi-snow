@@ -489,16 +489,22 @@ fn output_row(
             // Nodata on bare ground and zS5 = 0 on every row are the
             // reference's output conventions, copied, not derived.
             r.set("zS5", 0.0);
-            let snow = &c.elements[c.soil_elements..];
-            if let Some(index) = stability::reported_lwc_index(
-                snow.iter().map(|e| (e.thickness, e.composition.water)),
-                c.snow_height(),
-            ) {
+            if let Some(index) = lwc_index_s5(c) {
                 r.set("S5", index);
             }
         }
     }
     r
+}
+
+/// SMET `S5` under `S5=LWC_INDEX_MITTERER2013`: the LWC index over the snow
+/// elements only (soil excluded), nodata where the written snow height is 0.
+pub fn lwc_index_s5(c: &Column) -> Option<f64> {
+    let snow = &c.elements[c.soil_elements..];
+    stability::reported_lwc_index(
+        snow.iter().map(|e| (e.thickness, e.composition.water)),
+        c.snow_height(),
+    )
 }
 
 /// Settled thickness of elements younger than `days`, m.

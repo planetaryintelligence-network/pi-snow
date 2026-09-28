@@ -24,8 +24,14 @@
 //!   the interface convention of the reference's 772 crust code, else 0;
 //! * K6: merging two elements takes the union of their Table 2 flags.
 //!
-//! "Below the melting point" in Eq. 50 uses this engine's `T_MELT`; the paper's
-//! T0 is the triple point, and a wet element here sits at exactly `T_MELT`.
+//! * K9: S = 0 and S = 1 are exact tests, as printed, reached through the
+//!   clamp at the end of each metamorphism step;
+//! * K10: "below the melting point" in Eq. 50 compares the element temperature
+//!   (mean of its two nodes after phase change) with this engine's `T_MELT`;
+//!   the paper's T0 is the triple point. Unlike Crocus's Eq. 3, pi-snow does
+//!   not pin a wet element at the melting point, so a slightly wet element can
+//!   pass from h = 2 to 4 while wet; {2, 4} and {3, 5} share every class and
+//!   differ only in the K5 marker digit.
 
 use crate::stability::GrainClass;
 use pi_snow_core::Microstructure;

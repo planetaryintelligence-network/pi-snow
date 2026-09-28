@@ -39,11 +39,23 @@ pub enum S5Index {
     None,
 }
 
+/// Extra mass bookkeeping output. Changes no physics and no byte of PRO or SMET.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MassReport {
+    /// SMET and PRO only (Phase 2).
+    #[default]
+    Phase2,
+    /// Also write `<station>_<experiment>.mass.csv`, the engine's own mass
+    /// terms per output row, since the SMET columns omit deposition.
+    Ledger,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
     pub grain_classification: GrainClassification,
     pub s5: S5Index,
+    pub mass_report: MassReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +97,13 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            "MASS_REPORT" => {
+                self.mass_report = match value {
+                    "PHASE2" => MassReport::Phase2,
+                    "LEDGER" => MassReport::Ledger,
+                    _ => return Err(bad()),
+                }
+            }
             _ => return Err(OptionError(format!("unknown physics option {key:?}"))),
         }
         Ok(())
@@ -111,6 +130,22 @@ mod tests {
         assert_eq!(o.water_retention, WaterRetention::Wever2014Printed);
         assert_eq!(o.grain_classification, GrainClassification::PiSnow2026);
         assert_eq!(o.s5, S5Index::None);
+        assert_eq!(o.mass_report, MassReport::Phase2);
+    }
+
+    #[test]
+    fn engine_mass_values_parse() {
+        let o = PhysicsOptions::from_settings([
+            "WATER_RETENTION=COLEOU_LESAFFRE_1998",
+            "MASS_REPORT=LEDGER",
+        ])
+        .unwrap();
+        assert_eq!(o.water_retention, WaterRetention::ColeouLesaffre1998);
+        assert_eq!(o.mass_report, MassReport::Ledger);
+        let o =
+            PhysicsOptions::from_settings(["WATER_RETENTION=COLEOU_LESAFFRE_1998_NARROW"]).unwrap();
+        assert_eq!(o.water_retention, WaterRetention::ColeouLesaffre1998Narrow);
+        assert!(PhysicsOptions::from_settings(["MASS_REPORT=YES"]).is_err());
     }
 
     #[test]

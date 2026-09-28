@@ -74,6 +74,9 @@ fn main() -> Result<()> {
     let stem = output.join(format!("{}_{}", cfg.station_id, cfg.experiment));
     std::fs::write(stem.with_extension("smet"), out.smet)?;
     std::fs::write(stem.with_extension("pro"), out.pro)?;
+    if let Some(mass) = out.mass {
+        std::fs::write(stem.with_extension("mass.csv"), mass)?;
+    }
     eprintln!(
         "pi-snow {}: {} steps for {} in {:.3} s",
         env!("CARGO_PKG_VERSION"),

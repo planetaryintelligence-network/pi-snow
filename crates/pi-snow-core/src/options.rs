@@ -23,6 +23,8 @@ pub enum GrainClassification {
     /// The Phase 2 engine's own, unsourced rule.
     #[default]
     PiSnow2026,
+    /// Crocus v3.0.2's Eq. 144 with its history tracker (Lafaysse et al. 2026).
+    Lafaysse2026,
 }
 
 /// The SMET `S5` stability column.
@@ -68,6 +70,7 @@ impl PhysicsOptions {
             "GRAIN_CLASSIFICATION" => {
                 self.grain_classification = match value {
                     "PI_SNOW_2026" => GrainClassification::PiSnow2026,
+                    "LAFAYSSE2026" => GrainClassification::Lafaysse2026,
                     _ => return Err(bad()),
                 }
             }
@@ -114,6 +117,14 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(o, PhysicsOptions::default());
+    }
+
+    #[test]
+    fn lafaysse2026_grain_classification_parses() {
+        let o = PhysicsOptions::from_settings(["GRAIN_CLASSIFICATION=LAFAYSSE2026"]).unwrap();
+        assert_eq!(o.grain_classification, GrainClassification::Lafaysse2026);
+        assert_eq!(o.water_retention, WaterRetention::default());
+        assert_eq!(o.s5, S5Index::default());
     }
 
     #[test]

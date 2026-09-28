@@ -20,12 +20,14 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
+use pi_snow_core::options::GrainClassification;
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
 use pi_snow_io::smet::{OutputRow, Smet};
 use pi_snow_physics::albedo;
 use pi_snow_physics::atmosphere::pressure_at_altitude;
+use pi_snow_physics::grain_classification;
 use pi_snow_physics::metamorphism::{self, History, Local};
 use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
 use pi_snow_physics::settlement::{self, Br92, Viscosity};
@@ -327,6 +329,12 @@ pub fn run_with_options(
                     lwc_percent: lwc,
                 };
                 metamorphism::step(&mut e.micro, &local, &mut h, dt);
+                e.grain_history = grain_classification::update_history(
+                    e.grain_history,
+                    &e.micro,
+                    temps[i],
+                    lwc / 100.0,
+                );
                 e.age_days += dt / 86_400.0;
             }
 
@@ -367,8 +375,8 @@ pub fn run_with_options(
         let on_the_hour = t.minute() == 0 && t.second() == 0;
         if first_output || on_the_hour {
             first_output = false;
-            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg));
-            pro_text.push_str(&pro::write_timestep(&profile(t, &column)));
+            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
+            pro_text.push_str(&pro::write_timestep(&profile(t, &column, options)));
             acc = Accum::default();
         }
     }
@@ -407,6 +415,7 @@ fn output_row(
     vw: f64,
     dw: f64,
     tsg: f64,
+    options: &PhysicsOptions,
 ) -> OutputRow {
     let n = a.n.max(1.0);
     let mut r = OutputRow::nodata(t);
@@ -457,7 +466,7 @@ fn output_row(
     }
     // Profile minima of the indices, with their heights, as the reference
     // reports them; the ceiling and zero height on bare ground.
-    let layers = layers(c);
+    let layers = layers(c, options);
     let idx = stability::indices(&layers, c.snow_height());
     let tops = c.element_top_heights();
     let minimum = |f: fn(&stability::Indices) -> Option<f64>| {
@@ -493,7 +502,7 @@ fn new_snow_height(c: &Column, days: f64) -> f64 {
         .sum()
 }
 
-fn layers(c: &Column) -> Vec<Layer> {
+fn layers(c: &Column, options: &PhysicsOptions) -> Vec<Layer> {
     let hs = c.snow_height();
     let tops = c.element_top_heights();
     let temps = c.element_temperatures();
@@ -501,7 +510,14 @@ fn layers(c: &Column) -> Vec<Layer> {
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let code = metamorphism::classify(&e.micro, &history(e), e.density());
+            let code = match options.grain_classification {
+                GrainClassification::PiSnow2026 => {
+                    metamorphism::classify(&e.micro, &history(e), e.density())
+                }
+                GrainClassification::Lafaysse2026 => {
+                    grain_classification::lafaysse2026(&e.micro, e.grain_history)
+                }
+            };
             Layer {
                 depth_top: hs - tops[i],
                 thickness: e.thickness,
@@ -522,8 +538,8 @@ fn hardness(code: u16, density: f64) -> f64 {
         .unwrap_or(NODATA)
 }
 
-fn profile(t: DateTime<Utc>, c: &Column) -> ProTimestep {
-    let layers = layers(c);
+fn profile(t: DateTime<Utc>, c: &Column, options: &PhysicsOptions) -> ProTimestep {
+    let layers = layers(c, options);
     let idx = stability::indices(&layers, c.snow_height());
     let tops = c.element_top_heights();
     let temps = c.element_temperatures();

@@ -1,7 +1,9 @@
 //! A characterisation, not a specification: with wind measured well above the
 //! scalars, the Monin-Obukhov equations with Holtslag and De Bruin's stable
-//! functions have no solution above a bulk Richardson number of roughly
-//! (z_s/z_w)^2 / 0.7, and the iteration returns the zero-flux limit. Found by
+//! functions have no solution above a bulk Richardson number that, at z_w 9.5
+//! m and z_s 1.5 m, lies between about 0.05 and 0.07 (above the large-zeta
+//! bound (z_s/z_w)^2 / 0.7 = 0.036 a second, weaker root appears first), and
+//! the iteration returns the zero-flux limit. Found by
 //! engine-mass-v1 (a third of both-snow hours on the v3b units); pinned here so
 //! a change to it is deliberate.
 
@@ -31,7 +33,7 @@ fn below_the_critical_richardson_number_the_solve_converges() {
 
 #[test]
 fn above_it_the_mo_solve_decouples_and_louis_does_not() {
-    // U 2 m/s, 5 K inversion: bulk Ri 0.069, above (1.5/9.5)^2/0.7 = 0.036.
+    // U 2 m/s, 5 K inversion: bulk Ri 0.069, where no root is left.
     let l = layer(2.0, 268.0, 263.0);
     let mo = turbulence::fluxes(&l, Scheme::MoHoltslag);
     assert!(

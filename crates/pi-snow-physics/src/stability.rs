@@ -377,3 +377,51 @@ pub fn indices_with(layers: &[Layer], snow_height_m: f64, form: SkierForm) -> Ve
     }
     out
 }
+
+/// Volumetric liquid water content that normalises the LWC index: the start
+/// of the transition from the pendular to the funicular regime, 3 % by volume
+/// (Mitterer et al. 2013, section 3).
+pub const LWC_INDEX_THRESHOLD: f64 = 0.03;
+
+/// Liquid water content index of Mitterer, Techel, Fierz and Schweizer (2013),
+/// *An operational supporting tool for assessing wet-snow avalanche danger*,
+/// ISSW Grenoble, 334-338, eq. 1: the average volumetric liquid water content
+/// of the entire snowpack divided by [`LWC_INDEX_THRESHOLD`]. Hendrick et al.
+/// (2023, Journal of Glaciology 69, 1365-1378, eq. 1) state the average as
+/// weighted by layer height, which is what is computed here.
+///
+/// `layers` gives each snow layer's thickness (m) and volumetric liquid water
+/// fraction. `None` when the layers have no thickness, where the reference
+/// writes nodata.
+///
+/// This is SNOWPACK 3.7.0's SMET `S5` in the configuration studied: its output
+/// satisfies `S5 = MS_Water / (rho_w HS) / 0.03` on every snow row of the v3b
+/// reference run (experiments/engine-s5-danger-v1/lab-notes.md). That identity
+/// was established from the output, not from SNOWPACK's source.
+pub fn lwc_index(layers: impl IntoIterator<Item = (f64, f64)>) -> Option<f64> {
+    let (depth, water) = layers
+        .into_iter()
+        .fold((0.0, 0.0), |(d, w), (h, theta_w)| (d + h, w + h * theta_w));
+    (depth > 0.0).then(|| water / (LWC_INDEX_THRESHOLD * depth))
+}
+
+/// The smallest snow height the SMET output shows as non-zero, m: half of the
+/// 0.001 cm `HS_mod` is written to. Below it the written height reads 0.000.
+pub const HS_REPORTED_MIN_M: f64 = 5e-6;
+
+/// [`lwc_index`] as the output reports it: nodata wherever the written snow
+/// height is 0, the reference's convention (it writes `S5` nodata exactly when
+/// its `HS_mod` is 0). Without this, a trace thinner than the output shows
+/// would carry an index over a vanishing thickness (values up to 20 were seen;
+/// experiments/engine-s5-danger-v1/plan.md, amendment 1). Interface-derived,
+/// not physics.
+pub fn reported_lwc_index(
+    layers: impl IntoIterator<Item = (f64, f64)>,
+    snow_height_m: f64,
+) -> Option<f64> {
+    if snow_height_m < HS_REPORTED_MIN_M {
+        None
+    } else {
+        lwc_index(layers)
+    }
+}

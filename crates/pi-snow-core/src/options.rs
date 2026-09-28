@@ -31,6 +31,10 @@ pub enum S5Index {
     /// Not computed; written as nodata (Phase 2).
     #[default]
     None,
+    /// The liquid water content index of Mitterer et al. (2013) eq. 1, which is
+    /// what SNOWPACK 3.7.0 writes as `S5` here (identified from its output);
+    /// see `pi_snow_physics::stability::lwc_index`.
+    LwcIndexMitterer2013,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -74,6 +78,7 @@ impl PhysicsOptions {
             "S5" => {
                 self.s5 = match value {
                     "NONE" => S5Index::None,
+                    "LWC_INDEX_MITTERER2013" => S5Index::LwcIndexMitterer2013,
                     _ => return Err(bad()),
                 }
             }
@@ -121,5 +126,19 @@ mod tests {
         assert!(PhysicsOptions::from_settings(["NOPE=1"]).is_err());
         assert!(PhysicsOptions::from_settings(["S5=MAYBE"]).is_err());
         assert!(PhysicsOptions::from_settings(["S5"]).is_err());
+    }
+
+    #[test]
+    fn s5_lwc_index_parses() {
+        let o = PhysicsOptions::from_settings(["S5=LWC_INDEX_MITTERER2013"]).unwrap();
+        assert_eq!(o.s5, S5Index::LwcIndexMitterer2013);
+        assert_eq!(
+            PhysicsOptions {
+                s5: S5Index::None,
+                ..o
+            },
+            PhysicsOptions::default(),
+            "only the S5 key changes"
+        );
     }
 }

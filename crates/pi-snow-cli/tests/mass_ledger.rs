@@ -164,3 +164,15 @@ fn coleou_lesaffre_retention_moves_water_and_conserves_mass() {
         assert!((pair[1].swe - pair[0].swe - pair[1].net).abs() < 1e-6);
     }
 }
+
+#[test]
+fn louis_turbulence_reaches_the_output_and_conserves_mass() {
+    let default = run(&["MASS_REPORT=LEDGER"]);
+    let louis = run(&["MASS_REPORT=LEDGER", "TURBULENCE=LOUIS1979"]);
+    assert_eq!(run(&["TURBULENCE=FROM_INI"]).smet, run(&[]).smet);
+    assert_ne!(default.smet, louis.smet, "the scheme must reach the output");
+    let rows = ledger_rows(&louis.mass.unwrap());
+    for pair in rows.windows(2) {
+        assert!((pair[1].swe - pair[0].swe - pair[1].net).abs() < 1e-6);
+    }
+}

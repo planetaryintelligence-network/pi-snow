@@ -50,12 +50,24 @@ pub enum MassReport {
     Ledger,
 }
 
+/// Turbulent exchange scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Turbulence {
+    /// Whatever the INI's `ATMOSPHERIC_STABILITY` selects (Phase 2).
+    #[default]
+    FromIni,
+    /// The engine's Louis (1979) bulk-Richardson scheme whatever the INI
+    /// says: a diagnostic arm of engine-mass-v1 (amendment 1), not a fix.
+    Louis1979,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
     pub grain_classification: GrainClassification,
     pub s5: S5Index,
     pub mass_report: MassReport,
+    pub turbulence: Turbulence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +116,13 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            "TURBULENCE" => {
+                self.turbulence = match value {
+                    "FROM_INI" => Turbulence::FromIni,
+                    "LOUIS1979" => Turbulence::Louis1979,
+                    _ => return Err(bad()),
+                }
+            }
             _ => return Err(OptionError(format!("unknown physics option {key:?}"))),
         }
         Ok(())
@@ -131,6 +150,7 @@ mod tests {
         assert_eq!(o.grain_classification, GrainClassification::PiSnow2026);
         assert_eq!(o.s5, S5Index::None);
         assert_eq!(o.mass_report, MassReport::Phase2);
+        assert_eq!(o.turbulence, Turbulence::FromIni);
     }
 
     #[test]
@@ -146,6 +166,12 @@ mod tests {
             PhysicsOptions::from_settings(["WATER_RETENTION=COLEOU_LESAFFRE_1998_NARROW"]).unwrap();
         assert_eq!(o.water_retention, WaterRetention::ColeouLesaffre1998Narrow);
         assert!(PhysicsOptions::from_settings(["MASS_REPORT=YES"]).is_err());
+        let o = PhysicsOptions::from_settings(["TURBULENCE=LOUIS1979"]).unwrap();
+        assert_eq!(o.turbulence, Turbulence::Louis1979);
+        assert_eq!(
+            PhysicsOptions::from_settings(["TURBULENCE=FROM_INI"]).unwrap(),
+            PhysicsOptions::default()
+        );
     }
 
     #[test]

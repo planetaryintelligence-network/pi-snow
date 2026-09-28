@@ -20,7 +20,7 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
-use pi_snow_core::options::MassReport;
+use pi_snow_core::options::{MassReport, Turbulence};
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
@@ -134,9 +134,10 @@ pub fn run_with_options(
     let (i_iswr, i_ilwr, i_psum) = (field("ISWR")?, field("ILWR")?, field("PSUM")?);
     let i_tsg = forcing.field_index("TSG");
 
-    let scheme = match cfg.stability {
-        Stability::MoHoltslag => Scheme::MoHoltslag,
-        Stability::Richardson => Scheme::Louis,
+    let scheme = match (options.turbulence, cfg.stability) {
+        (Turbulence::Louis1979, _) => Scheme::Louis,
+        (Turbulence::FromIni, Stability::MoHoltslag) => Scheme::MoHoltslag,
+        (Turbulence::FromIni, Stability::Richardson) => Scheme::Louis,
     };
     let density_scheme = match cfg.new_snow_density {
         NewSnowDensity::LehningNew => DensityScheme::Pahaut,

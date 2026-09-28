@@ -115,7 +115,7 @@ pub fn run(
 /// `run` with physics chosen by `--physics`; the default options are Phase 2.
 pub fn run_with_options(
     cfg: &RunConfig,
-    #[allow(unused_variables)] options: &PhysicsOptions,
+    options: &PhysicsOptions,
     site: &Site,
     forcing: &Smet,
     start: Column,

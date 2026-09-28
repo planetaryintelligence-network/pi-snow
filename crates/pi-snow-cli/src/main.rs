@@ -30,11 +30,18 @@ fn main() -> Result<()> {
         .with_context(|| format!("bad end time {end_text:?}"))?
         .and_utc();
 
-    let physics = PhysicsOptions::from_settings(
-        args.windows(2)
-            .filter(|w| w[0] == "--physics")
-            .map(|w| w[1].as_str()),
-    )?;
+    // A mistyped flag must fail: silently dropping it would run Phase 2
+    // physics under an arm's label.
+    let mut settings = Vec::new();
+    let mut rest = args.iter().skip(1);
+    while let Some(a) = rest.next() {
+        if a == "--physics" {
+            settings.push(rest.next().context("--physics needs KEY=VALUE")?.as_str());
+        } else if a.starts_with("--physics") {
+            bail!("write --physics KEY=VALUE as two arguments, got {a:?}");
+        }
+    }
+    let physics = PhysicsOptions::from_settings(settings)?;
 
     let root = ini_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let cfg = RunConfig::from_ini(&Ini::parse(&std::fs::read_to_string(&ini_path)?)?)?;

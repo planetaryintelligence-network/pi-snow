@@ -20,7 +20,7 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
-use pi_snow_core::options::S5Index;
+use pi_snow_core::options::{MassReport, S5Index, Turbulence};
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
@@ -36,6 +36,8 @@ use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
+
+use crate::ledger::{Interval, Ledger};
 
 /// Marker bits kept in `Microstructure::marker`.
 const MARK_REFROZEN: u16 = 1;
@@ -75,6 +77,8 @@ pub struct RunOutput {
     pub smet: String,
     pub pro: String,
     pub steps: usize,
+    /// The mass ledger, under `MASS_REPORT=LEDGER` only.
+    pub mass: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -130,9 +134,10 @@ pub fn run_with_options(
     let (i_iswr, i_ilwr, i_psum) = (field("ISWR")?, field("ILWR")?, field("PSUM")?);
     let i_tsg = forcing.field_index("TSG");
 
-    let scheme = match cfg.stability {
-        Stability::MoHoltslag => Scheme::MoHoltslag,
-        Stability::Richardson => Scheme::Louis,
+    let scheme = match (options.turbulence, cfg.stability) {
+        (Turbulence::Louis1979, _) => Scheme::Louis,
+        (Turbulence::FromIni, Stability::MoHoltslag) => Scheme::MoHoltslag,
+        (Turbulence::FromIni, Stability::Richardson) => Scheme::Louis,
     };
     let density_scheme = match cfg.new_snow_density {
         NewSnowDensity::LehningNew => DensityScheme::Pahaut,
@@ -158,6 +163,8 @@ pub fn run_with_options(
     let mut previous: Option<DateTime<Utc>> = None;
     let mut first_output = true;
     let mut steps = 0usize;
+    let mut ledger = (options.mass_report == MassReport::Ledger).then(Ledger::new);
+    let mut interval = Interval::default();
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -217,14 +224,18 @@ pub fn run_with_options(
         let deposited = deposition.add(&mut column, solid, &conditions, density_scheme);
         acc.snow += deposited;
         acc.rain += liquid;
+        interval.solid_precipitation += solid;
+        interval.deposited += deposited;
         let mut rain_rate = 0.0;
         if liquid > 0.0 {
             if let Some(top) = column.elements.last_mut() {
                 top.composition.water += liquid / (RHO_WATER * top.thickness);
                 top.composition.air = (1.0 - top.composition.ice - top.composition.water).max(0.0);
                 rain_rate = liquid / dt;
+                interval.rain_to_pack += liquid;
             } else {
                 acc.runoff += liquid;
+                interval.rain_to_ground += liquid;
             }
         }
 
@@ -286,12 +297,22 @@ pub fn run_with_options(
                     }
                 }
             }
-            acc.runoff += pc.drained + water::cascade(&mut column);
+            let runoff = water::cascade_with(&mut column, options.water_retention);
+            acc.runoff += pc.drained + runoff;
+            interval.drained += pc.drained;
+            interval.runoff += runoff;
 
             // 6. Sublimation or deposition on the top element.
             let vapour = b.vapour_mass * dt;
+            interval.vapour_flux += vapour;
             if let Some(top) = column.elements.last_mut() {
                 let ice = (top.ice_mass() + vapour).max(0.0);
+                let applied = ice - top.ice_mass();
+                if applied > 0.0 {
+                    interval.deposition_applied += applied;
+                } else {
+                    interval.sublimation_applied -= applied;
+                }
                 let scale = if top.ice_mass() > 0.0 {
                     ice / top.ice_mass()
                 } else {
@@ -371,6 +392,10 @@ pub fn run_with_options(
             rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
             pro_text.push_str(&pro::write_timestep(&profile(t, &column)));
             acc = Accum::default();
+            if let Some(l) = ledger.as_mut() {
+                l.push(t, column.swe(), deposition.buffered(), &interval);
+            }
+            interval = Interval::default();
         }
     }
     let smet = pi_snow_io::smet::write_output_smet(
@@ -387,6 +412,7 @@ pub fn run_with_options(
         smet,
         pro: pro_text,
         steps,
+        mass: ledger.map(Ledger::into_text),
     })
 }
 

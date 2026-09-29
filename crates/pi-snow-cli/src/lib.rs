@@ -3,3 +3,4 @@
 //! interchangeable at the pipeline's existing seam (`_run_native`).
 
 pub mod engine;
+pub mod ledger;

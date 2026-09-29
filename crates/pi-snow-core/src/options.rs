@@ -15,6 +15,12 @@ pub enum WaterRetention {
     /// Wever et al. (2014) eq. 1 as printed, clamped at the pore volume (Phase 2).
     #[default]
     Wever2014Printed,
+    /// Coleou and Lesaffre (1998): their regression over the porosity range
+    /// their samples span, a constant share of pore volume outside it.
+    ColeouLesaffre1998,
+    /// The same regression over the narrower range P/(1-P) 0.9 to 1.8 once
+    /// proposed for it (sensitivity arm of engine-mass-v1).
+    ColeouLesaffre1998Narrow,
 }
 
 /// Mapping of microstructure onto the Swiss grain code.
@@ -37,11 +43,35 @@ pub enum S5Index {
     LwcIndexMitterer2013,
 }
 
+/// Extra mass bookkeeping output. Changes no physics and no byte of PRO or SMET.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MassReport {
+    /// SMET and PRO only (Phase 2).
+    #[default]
+    Phase2,
+    /// Also write `<station>_<experiment>.mass.csv`, the engine's own mass
+    /// terms per output row, since the SMET columns omit deposition.
+    Ledger,
+}
+
+/// Turbulent exchange scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Turbulence {
+    /// Whatever the INI's `ATMOSPHERIC_STABILITY` selects (Phase 2).
+    #[default]
+    FromIni,
+    /// The engine's Louis (1979) bulk-Richardson scheme whatever the INI
+    /// says: a diagnostic arm of engine-mass-v1 (amendment 1), not a fix.
+    Louis1979,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
     pub grain_classification: GrainClassification,
     pub s5: S5Index,
+    pub mass_report: MassReport,
+    pub turbulence: Turbulence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +96,8 @@ impl PhysicsOptions {
             "WATER_RETENTION" => {
                 self.water_retention = match value {
                     "WEVER2014_PRINTED" => WaterRetention::Wever2014Printed,
+                    "COLEOU_LESAFFRE_1998" => WaterRetention::ColeouLesaffre1998,
+                    "COLEOU_LESAFFRE_1998_NARROW" => WaterRetention::ColeouLesaffre1998Narrow,
                     _ => return Err(bad()),
                 }
             }
@@ -79,6 +111,20 @@ impl PhysicsOptions {
                 self.s5 = match value {
                     "NONE" => S5Index::None,
                     "LWC_INDEX_MITTERER2013" => S5Index::LwcIndexMitterer2013,
+                    _ => return Err(bad()),
+                }
+            }
+            "MASS_REPORT" => {
+                self.mass_report = match value {
+                    "PHASE2" => MassReport::Phase2,
+                    "LEDGER" => MassReport::Ledger,
+                    _ => return Err(bad()),
+                }
+            }
+            "TURBULENCE" => {
+                self.turbulence = match value {
+                    "FROM_INI" => Turbulence::FromIni,
+                    "LOUIS1979" => Turbulence::Louis1979,
                     _ => return Err(bad()),
                 }
             }
@@ -108,6 +154,29 @@ mod tests {
         assert_eq!(o.water_retention, WaterRetention::Wever2014Printed);
         assert_eq!(o.grain_classification, GrainClassification::PiSnow2026);
         assert_eq!(o.s5, S5Index::None);
+        assert_eq!(o.mass_report, MassReport::Phase2);
+        assert_eq!(o.turbulence, Turbulence::FromIni);
+    }
+
+    #[test]
+    fn engine_mass_values_parse() {
+        let o = PhysicsOptions::from_settings([
+            "WATER_RETENTION=COLEOU_LESAFFRE_1998",
+            "MASS_REPORT=LEDGER",
+        ])
+        .unwrap();
+        assert_eq!(o.water_retention, WaterRetention::ColeouLesaffre1998);
+        assert_eq!(o.mass_report, MassReport::Ledger);
+        let o =
+            PhysicsOptions::from_settings(["WATER_RETENTION=COLEOU_LESAFFRE_1998_NARROW"]).unwrap();
+        assert_eq!(o.water_retention, WaterRetention::ColeouLesaffre1998Narrow);
+        assert!(PhysicsOptions::from_settings(["MASS_REPORT=YES"]).is_err());
+        let o = PhysicsOptions::from_settings(["TURBULENCE=LOUIS1979"]).unwrap();
+        assert_eq!(o.turbulence, Turbulence::Louis1979);
+        assert_eq!(
+            PhysicsOptions::from_settings(["TURBULENCE=FROM_INI"]).unwrap(),
+            PhysicsOptions::default()
+        );
     }
 
     #[test]

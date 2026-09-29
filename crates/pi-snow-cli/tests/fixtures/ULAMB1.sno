@@ -1,0 +1,27 @@
+SMET 1.1 ASCII
+[HEADER]
+station_id = ULAMB1
+station_name     = Huntington Canyon Portable
+longitude = -111.22507
+latitude = 39.59478
+altitude = 2754
+nodata           = -999
+tz               = 0
+source           = Univerity of Utah EFD Lab
+ProfileDate = 2026-01-30T23:10+00:00
+HS_Last          = 0
+SlopeAngle = 33.5
+SlopeAzi = 1.4
+nSoilLayerData   = 0
+nSnowLayerData   = 0
+SoilAlbedo       = 0.09
+BareSoil_z0      = 0.200
+CanopyHeight     = 0.00
+CanopyLeafAreaIndex = 0.00
+CanopyDirectThroughfall = 1.00
+WindScalingFactor = 1.00
+ErosionLevel     = 0
+TimeCountDeltaHS = 0.000000
+fields           = timestamp Layer_Thick  T  Vol_Frac_I  Vol_Frac_W  Vol_Frac_V  Vol_Frac_S Rho_S Conduc_S HeatCapac_S  rg  rb  dd  sp  mk mass_hoar ne CDot metamo
+[DATA]
+    

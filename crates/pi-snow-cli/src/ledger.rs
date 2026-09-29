@@ -36,20 +36,18 @@ pub struct Interval {
     pub deposition_applied: f64,
 }
 
-impl Interval {
-    /// Net mass the stages claim entered the pack: what the closure test in
-    /// `experiments/engine-mass-v1/plan.md` (form PL) compares with the SWE
-    /// change.
-    pub fn net_to_pack(&self) -> f64 {
-        self.deposited + self.rain_to_pack - self.runoff - self.drained - self.sublimation_applied
-            + self.deposition_applied
-    }
-}
-
-/// The ledger's rows, one per SMET row.
-#[derive(Debug, Default)]
+/// The ledger's rows, one per SMET row. Built with [`Ledger::new`], which
+/// writes the header.
+#[derive(Debug)]
 pub struct Ledger {
     text: String,
+}
+
+impl Default for Ledger {
+    /// The same as [`Ledger::new`]: an empty ledger still carries its header.
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Ledger {

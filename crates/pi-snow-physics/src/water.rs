@@ -126,8 +126,9 @@ pub fn cl98_pore_share(pore_to_ice: f64) -> f64 {
 /// Lesaffre (1998). Inside `range` the regression, converted to volume as
 /// `theta_w = W/(1-W) (rho_i/rho_w) theta_i`; outside it a constant share of
 /// pore volume, the regression's share at the nearer end, so the form is
-/// continuous. Extrapolating the regression instead climbs to 11 to 12 % of
-/// pore volume at both extremes, outside the 6.5 to 8.5 % the paper reports;
+/// continuous. Extrapolating the regression instead leaves the 6.5 to 8.5 %
+/// of pore volume the paper reports (about 11.5 % near theta_i 0.1, about 20 %
+/// near 0.9);
 /// a constant share outside is the choice Colbeck (1974), whom the paper
 /// cites, supports. That outside rule is ours.
 pub fn holding_capacity_cl98(ice_fraction: f64, range: PorosityRange) -> f64 {

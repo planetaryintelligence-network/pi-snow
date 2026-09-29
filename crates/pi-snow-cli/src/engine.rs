@@ -20,12 +20,14 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
-use pi_snow_core::{Column, Element};
+use pi_snow_core::options::{GrainClassification, MassReport, S5Index, Turbulence};
+use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
 use pi_snow_io::smet::{OutputRow, Smet};
 use pi_snow_physics::albedo;
 use pi_snow_physics::atmosphere::pressure_at_altitude;
+use pi_snow_physics::grain_classification;
 use pi_snow_physics::metamorphism::{self, History, Local};
 use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
 use pi_snow_physics::settlement::{self, Br92, Viscosity};
@@ -35,6 +37,8 @@ use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
+
+use crate::ledger::{Interval, Ledger};
 
 /// Marker bits kept in `Microstructure::marker`.
 const MARK_REFROZEN: u16 = 1;
@@ -74,6 +78,8 @@ pub struct RunOutput {
     pub smet: String,
     pub pro: String,
     pub steps: usize,
+    /// The mass ledger, under `MASS_REPORT=LEDGER` only.
+    pub mass: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -108,6 +114,18 @@ pub fn run(
     start: Column,
     end: DateTime<Utc>,
 ) -> Result<RunOutput, RunError> {
+    run_with_options(cfg, &PhysicsOptions::default(), site, forcing, start, end)
+}
+
+/// `run` with physics chosen by `--physics`; the default options are Phase 2.
+pub fn run_with_options(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+) -> Result<RunOutput, RunError> {
     let field = |name: &'static str| {
         forcing
             .field_index(name)
@@ -117,9 +135,10 @@ pub fn run(
     let (i_iswr, i_ilwr, i_psum) = (field("ISWR")?, field("ILWR")?, field("PSUM")?);
     let i_tsg = forcing.field_index("TSG");
 
-    let scheme = match cfg.stability {
-        Stability::MoHoltslag => Scheme::MoHoltslag,
-        Stability::Richardson => Scheme::Louis,
+    let scheme = match (options.turbulence, cfg.stability) {
+        (Turbulence::Louis1979, _) => Scheme::Louis,
+        (Turbulence::FromIni, Stability::MoHoltslag) => Scheme::MoHoltslag,
+        (Turbulence::FromIni, Stability::Richardson) => Scheme::Louis,
     };
     let density_scheme = match cfg.new_snow_density {
         NewSnowDensity::LehningNew => DensityScheme::Pahaut,
@@ -145,6 +164,8 @@ pub fn run(
     let mut previous: Option<DateTime<Utc>> = None;
     let mut first_output = true;
     let mut steps = 0usize;
+    let mut ledger = (options.mass_report == MassReport::Ledger).then(Ledger::new);
+    let mut interval = Interval::default();
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -204,14 +225,18 @@ pub fn run(
         let deposited = deposition.add(&mut column, solid, &conditions, density_scheme);
         acc.snow += deposited;
         acc.rain += liquid;
+        interval.solid_precipitation += solid;
+        interval.deposited += deposited;
         let mut rain_rate = 0.0;
         if liquid > 0.0 {
             if let Some(top) = column.elements.last_mut() {
                 top.composition.water += liquid / (RHO_WATER * top.thickness);
                 top.composition.air = (1.0 - top.composition.ice - top.composition.water).max(0.0);
                 rain_rate = liquid / dt;
+                interval.rain_to_pack += liquid;
             } else {
                 acc.runoff += liquid;
+                interval.rain_to_ground += liquid;
             }
         }
 
@@ -273,12 +298,22 @@ pub fn run(
                     }
                 }
             }
-            acc.runoff += pc.drained + water::cascade(&mut column);
+            let runoff = water::cascade_with(&mut column, options.water_retention);
+            acc.runoff += pc.drained + runoff;
+            interval.drained += pc.drained;
+            interval.runoff += runoff;
 
             // 6. Sublimation or deposition on the top element.
             let vapour = b.vapour_mass * dt;
+            interval.vapour_flux += vapour;
             if let Some(top) = column.elements.last_mut() {
                 let ice = (top.ice_mass() + vapour).max(0.0);
+                let applied = ice - top.ice_mass();
+                if applied > 0.0 {
+                    interval.deposition_applied += applied;
+                } else {
+                    interval.sublimation_applied -= applied;
+                }
                 let scale = if top.ice_mass() > 0.0 {
                     ice / top.ice_mass()
                 } else {
@@ -315,6 +350,12 @@ pub fn run(
                     lwc_percent: lwc,
                 };
                 metamorphism::step(&mut e.micro, &local, &mut h, dt);
+                e.grain_history = grain_classification::update_history(
+                    e.grain_history,
+                    &e.micro,
+                    temps[i],
+                    lwc / 100.0,
+                );
                 e.age_days += dt / 86_400.0;
             }
 
@@ -355,9 +396,13 @@ pub fn run(
         let on_the_hour = t.minute() == 0 && t.second() == 0;
         if first_output || on_the_hour {
             first_output = false;
-            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg));
-            pro_text.push_str(&pro::write_timestep(&profile(t, &column)));
+            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
+            pro_text.push_str(&pro::write_timestep(&profile(t, &column, options)));
             acc = Accum::default();
+            if let Some(l) = ledger.as_mut() {
+                l.push(t, column.swe(), deposition.buffered(), &interval);
+            }
+            interval = Interval::default();
         }
     }
     let smet = pi_snow_io::smet::write_output_smet(
@@ -374,6 +419,7 @@ pub fn run(
         smet,
         pro: pro_text,
         steps,
+        mass: ledger.map(Ledger::into_text),
     })
 }
 
@@ -395,6 +441,7 @@ fn output_row(
     vw: f64,
     dw: f64,
     tsg: f64,
+    options: &PhysicsOptions,
 ) -> OutputRow {
     let n = a.n.max(1.0);
     let mut r = OutputRow::nodata(t);
@@ -445,7 +492,7 @@ fn output_row(
     }
     // Profile minima of the indices, with their heights, as the reference
     // reports them; the ceiling and zero height on bare ground.
-    let layers = layers(c);
+    let layers = layers(c, options);
     let idx = stability::indices(&layers, c.snow_height());
     let tops = c.element_top_heights();
     let minimum = |f: fn(&stability::Indices) -> Option<f64>| {
@@ -469,7 +516,28 @@ fn output_row(
         r.set(s, value);
         r.set(z, 100.0 * height);
     }
+    match options.s5 {
+        S5Index::None => {}
+        S5Index::LwcIndexMitterer2013 => {
+            // Nodata on bare ground and zS5 = 0 on every row are the
+            // reference's output conventions, copied, not derived.
+            r.set("zS5", 0.0);
+            if let Some(index) = lwc_index_s5(c) {
+                r.set("S5", index);
+            }
+        }
+    }
     r
+}
+
+/// SMET `S5` under `S5=LWC_INDEX_MITTERER2013`: the LWC index over the snow
+/// elements only (soil excluded), nodata where the written snow height is 0.
+pub fn lwc_index_s5(c: &Column) -> Option<f64> {
+    let snow = &c.elements[c.soil_elements..];
+    stability::reported_lwc_index(
+        snow.iter().map(|e| (e.thickness, e.composition.water)),
+        c.snow_height(),
+    )
 }
 
 /// Settled thickness of elements younger than `days`, m.
@@ -481,7 +549,7 @@ fn new_snow_height(c: &Column, days: f64) -> f64 {
         .sum()
 }
 
-fn layers(c: &Column) -> Vec<Layer> {
+fn layers(c: &Column, options: &PhysicsOptions) -> Vec<Layer> {
     let hs = c.snow_height();
     let tops = c.element_top_heights();
     let temps = c.element_temperatures();
@@ -489,7 +557,14 @@ fn layers(c: &Column) -> Vec<Layer> {
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let code = metamorphism::classify(&e.micro, &history(e), e.density());
+            let code = match options.grain_classification {
+                GrainClassification::PiSnow2026 => {
+                    metamorphism::classify(&e.micro, &history(e), e.density())
+                }
+                GrainClassification::Lafaysse2026 => {
+                    grain_classification::lafaysse2026(&e.micro, e.grain_history)
+                }
+            };
             Layer {
                 depth_top: hs - tops[i],
                 thickness: e.thickness,
@@ -510,8 +585,8 @@ fn hardness(code: u16, density: f64) -> f64 {
         .unwrap_or(NODATA)
 }
 
-fn profile(t: DateTime<Utc>, c: &Column) -> ProTimestep {
-    let layers = layers(c);
+fn profile(t: DateTime<Utc>, c: &Column, options: &PhysicsOptions) -> ProTimestep {
+    let layers = layers(c, options);
     let idx = stability::indices(&layers, c.snow_height());
     let tops = c.element_top_heights();
     let temps = c.element_temperatures();

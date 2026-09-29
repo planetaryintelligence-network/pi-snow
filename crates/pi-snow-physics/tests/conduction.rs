@@ -33,6 +33,7 @@ fn uniform_column(n: usize, thickness: f64, density: f64, t0: f64) -> Column {
             soil_density: 0.0,
             soil_conductivity: 0.0,
             soil_heat_capacity: 0.0,
+            grain_history: 0,
         });
     }
     column.node_temperature = vec![t0; n + 1];

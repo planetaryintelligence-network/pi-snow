@@ -176,6 +176,7 @@ impl SnoFile {
                     soil_density: layer.soil_density,
                     soil_conductivity: layer.soil_conductivity,
                     soil_heat_capacity: layer.soil_heat_capacity,
+                    grain_history: 0,
                 });
                 nodes.push(layer.temperature);
             }

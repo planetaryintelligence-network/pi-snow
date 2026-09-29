@@ -32,6 +32,7 @@ fn element(thickness: f64, water: f64, soil: f64) -> Element {
         soil_density: 2600.0,
         soil_conductivity: 2.0,
         soil_heat_capacity: 800.0,
+        grain_history: 0,
     }
 }
 

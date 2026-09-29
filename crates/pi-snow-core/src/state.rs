@@ -129,6 +129,9 @@ pub struct Element {
     pub soil_conductivity: f64,
     /// Heat capacity of the soil grains, J kg^-1 K^-1.
     pub soil_heat_capacity: f64,
+    /// Crocus's historical tracker h (Lafaysse et al. 2026, Table 2), read only
+    /// by `GRAIN_CLASSIFICATION=LAFAYSSE2026`. 0 for new and SNO-read elements.
+    pub grain_history: u8,
 }
 
 impl Element {

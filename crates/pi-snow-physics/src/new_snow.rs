@@ -152,6 +152,7 @@ impl Deposition {
                 soil_density: 0.0,
                 soil_conductivity: 0.0,
                 soil_heat_capacity: 0.0,
+                grain_history: crate::grain_classification::NO_HISTORY,
             });
             column.node_temperature.push(node_t);
         }
@@ -227,5 +228,6 @@ fn combine(a: &Element, b: &Element) -> Element {
         soil_density: a.soil_density,
         soil_conductivity: a.soil_conductivity,
         soil_heat_capacity: a.soil_heat_capacity,
+        grain_history: crate::grain_classification::merge_history(a.grain_history, b.grain_history),
     }
 }

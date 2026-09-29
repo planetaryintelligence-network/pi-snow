@@ -9,6 +9,7 @@
 
 pub mod albedo;
 pub mod atmosphere;
+pub mod grain_classification;
 pub mod metamorphism;
 pub mod new_snow;
 pub mod settlement;

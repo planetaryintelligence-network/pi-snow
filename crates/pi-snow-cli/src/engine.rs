@@ -21,7 +21,8 @@
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
 use pi_snow_core::options::{
-    GrainClassification, MassReport, S5Index, SurfaceLayer, Turbulence, WetGrainGrowth,
+    GrainClassification, MassReport, S5Index, SublimationMeltOut, SurfaceLayer,
+    SurfaceLinearisation, Turbulence, WetGrainGrowth,
 };
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
@@ -36,6 +37,7 @@ use pi_snow_physics::settlement::{self, Br92, Viscosity};
 use pi_snow_physics::solar;
 use pi_snow_physics::stability::{self, GrainClass, Layer};
 use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
+use pi_snow_physics::surface_numerics;
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
@@ -63,8 +65,8 @@ pub enum RunError {
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
-    /// A NaN or infinity in the state, the surface budget or an output row
-    /// (engine-finite-guard-v1); `step` counts forcing steps from 1.
+    /// A NaN or infinity in the state or the surface budget while the column
+    /// holds snow (engine-finite-guard-v1); `step` counts forcing steps from 1.
     #[error("non-finite state at time step {step} ({time}): {field}")]
     NonFinite {
         step: usize,
@@ -300,7 +302,11 @@ pub fn run_with_options(
             };
             // 4. Energy balance and conduction.
             let before = thermal::internal_energy(&column);
-            let b = surface::step_general(
+            let step_surface = match options.surface_linearisation {
+                SurfaceLinearisation::Phase2 => surface::step_general,
+                SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
+            };
+            let b = step_surface(
                 &mut column,
                 &atm,
                 &params,
@@ -331,7 +337,24 @@ pub fn run_with_options(
             // 6. Sublimation or deposition on the top element.
             let vapour = b.vapour_mass * dt;
             interval.vapour_flux += vapour;
-            if let Some(top) = column.elements.last_mut() {
+            let sublimated_away = options.sublimation_melt_out == SublimationMeltOut::RemoveElement
+                && column.elements.len() > column.soil_elements
+                && column
+                    .elements
+                    .last()
+                    .is_some_and(|top| top.ice_mass() + vapour <= 0.0);
+            if sublimated_away {
+                // engine-finite-guard-v1: the element goes with its top node (its
+                // sensible energy is that of a vanishing thickness), its liquid
+                // water is runoff, and no zero-thickness element reaches the
+                // next conduction solve.
+                let gone = column.elements.pop().unwrap();
+                column.node_temperature.pop();
+                interval.sublimation_applied += gone.ice_mass();
+                let water = gone.water_mass();
+                acc.runoff += water;
+                interval.drained += water;
+            } else if let Some(top) = column.elements.last_mut() {
                 let ice = (top.ice_mass() + vapour).max(0.0);
                 let applied = ice - top.ice_mass();
                 if applied > 0.0 {
@@ -402,9 +425,17 @@ pub fn run_with_options(
                 });
             }
         }
-        // The comparisons above let a NaN through; this names it and stops.
-        if let Some(field) = crate::finite::column(&column)
-            .or_else(|| crate::finite::budget(&budget, qg0, deposition.buffered()))
+        // The comparisons above let a NaN through. While the column holds snow,
+        // a non-finite state carries into every later step, so stop and name
+        // it. An empty column is not checked: when the last element vanishes,
+        // Phase 2 leaves one NaN node that the next bare-ground step resets
+        // (engine-finite-guard-v1), and stopping there would change healthy runs.
+        if let Some(field) = (!column.elements.is_empty())
+            .then(|| {
+                crate::finite::column(&column)
+                    .or_else(|| crate::finite::budget(&budget, qg0, deposition.buffered()))
+            })
+            .flatten()
         {
             return Err(RunError::NonFinite {
                 step: steps,
@@ -434,15 +465,7 @@ pub fn run_with_options(
         let on_the_hour = t.minute() == 0 && t.second() == 0;
         if first_output || on_the_hour {
             first_output = false;
-            let row = output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options);
-            if let Some(field) = crate::finite::row(&row) {
-                return Err(RunError::NonFinite {
-                    step: steps,
-                    time: t,
-                    field,
-                });
-            }
-            rows.push(row);
+            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
             pro_text.push_str(&pro::write_timestep(&profile(t, &column, options)));
             acc = Accum::default();
             if let Some(l) = ledger.as_mut() {

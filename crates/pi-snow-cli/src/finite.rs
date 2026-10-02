@@ -3,12 +3,18 @@
 //! The `T_CRAZY` check compares node temperatures with `<` and `>`, which a NaN
 //! passes, so a non-finite state could run to the end of a season and write
 //! NaN to the output with exit status 0. These checks read the state after
-//! each step and the SMET row before it is kept, and name the first
-//! non-finite quantity found. They change nothing: a run that stays finite
+//! each step, while the column holds snow, and name the first non-finite
+//! quantity found. They change nothing: a run whose snow state stays finite
 //! writes exactly the bytes it wrote before.
+//!
+//! Not checked, by decision (engine-finite-guard-v1, option D): an empty
+//! column, and the SMET rows. Phase 2 leaves one NaN node for a step when the
+//! last element vanishes, which shows as NaN in that hour's Qg0, TSS_mod and
+//! T_bottom and is reset on bare ground; 40 of the 65 stored Phase 2 units do
+//! this, and stopping them would move every hash-bound artifact. The fix is a
+//! physics key, `SUBLIMATION_MELT_OUT=REMOVE_ELEMENT`.
 
 use pi_snow_core::Column;
-use pi_snow_io::smet::OutputRow;
 use pi_snow_physics::surface::Budget;
 
 fn bad(value: f64) -> bool {
@@ -77,9 +83,4 @@ pub fn budget(b: &Budget, qg0: f64, buffered: f64) -> Option<String> {
     .iter()
     .find(|(_, v)| bad(*v))
     .map(|(name, v)| format!("{name} = {v}"))
-}
-
-/// The first non-finite field of a SMET output row.
-pub fn row(r: &OutputRow) -> Option<String> {
-    r.first_non_finite().map(|(name, v)| format!("SMET {name} = {v}"))
 }

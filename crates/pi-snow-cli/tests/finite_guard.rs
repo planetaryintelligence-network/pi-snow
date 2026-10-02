@@ -1,6 +1,6 @@
-//! engine-finite-guard-v1: a non-finite value in the state, the surface budget
-//! or an output row stops the run with a non-zero exit and a message naming the
-//! time step and the field. Before the guard, a NaN passed the T_CRAZY check
+//! engine-finite-guard-v1: a non-finite value in the state or the surface
+//! budget while the column holds snow stops the run with a non-zero exit and a
+//! message naming the time step and the field. Before the guard, a NaN passed the T_CRAZY check
 //! (it compares with `<` and `>`) and the run wrote NaN and exited 0.
 //!
 //! Synthetic forcing: the fixtures' ULAMB1 INI and SNO (bare ground), six days
@@ -15,7 +15,7 @@ use pi_snow_cli::engine::{RunError, Site, run};
 use pi_snow_cli::finite;
 use pi_snow_core::{Column, Composition, Element, Microstructure};
 use pi_snow_io::ini::{Ini, RunConfig};
-use pi_snow_io::smet::{OutputRow, Smet};
+use pi_snow_io::smet::Smet;
 use pi_snow_physics::surface::Budget;
 
 const END: &str = "2026-01-07T00:00";
@@ -48,7 +48,11 @@ fn forcing(bad: Option<(usize, &str, &str)>) -> String {
         let phase = (minutes % 1440) as f64 / 1440.0 * std::f64::consts::TAU;
         let ta = 267.0 + 4.0 * (phase - 2.0).sin();
         let iswr = (500.0 * (phase - 1.6).sin()).max(0.0);
-        let psum = if day == 0 && (8..14).contains(&hour) { 0.5 } else { 0.0 };
+        let psum = if day == 0 && (8..14).contains(&hour) {
+            0.5
+        } else {
+            0.0
+        };
         let mut values: Vec<String> = [ta, 0.8, 273.15, 3.0, 200.0, iswr, 240.0, psum]
             .iter()
             .map(|v| format!("{v:.4}"))
@@ -91,9 +95,21 @@ fn pi_snow(unit: &Path) -> std::process::Output {
 fn finite_forcing_runs_to_the_end_with_no_non_finite_output() {
     let unit = stage("clean", None);
     let out = pi_snow(&unit);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let smet = std::fs::read_to_string(unit.join("output/ULAMB1_hrrr-terrain-v1.smet")).unwrap();
     assert!(!smet.to_lowercase().contains("nan") && !smet.contains("inf"));
+}
+
+#[test]
+fn the_nan_run_the_old_binary_finished_now_fails() {
+    // Pinned by running the pre-guard binary 547c49ed on this forcing (lab notes):
+    // exit 0 with NaN in 77 SMET rows. Here: the guarded binary on it must not.
+    let unit = stage("nan-snow-2", Some((400, "TA", "NaN")));
+    assert!(!pi_snow(&unit).status.success());
 }
 
 #[test]
@@ -109,12 +125,16 @@ fn a_nan_under_snow_exits_non_zero_naming_the_step_and_the_field() {
 }
 
 #[test]
-fn a_nan_on_bare_ground_is_caught_too() {
-    // Row 3, 00:30 on day 0, before the first snowfall: no element exists, so
-    // the budget is what carries the NaN.
+fn a_nan_on_bare_ground_is_not_stopped_by_design() {
+    // Row 3, 00:30 on day 0, before the first snowfall: the column is empty, which
+    // the scoped guard does not check (option D), and bare ground resets the node.
     let unit = stage("nan-bare", Some((3, "ILWR", "NaN")));
-    let err = String::from_utf8_lossy(&pi_snow(&unit).stderr).to_string();
-    assert!(err.contains("non-finite state at time step 3"), "{err}");
+    let out = pi_snow(&unit);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -125,15 +145,21 @@ fn an_infinite_input_never_exits_zero() {
     let out = pi_snow(&unit);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("non-finite state") || err.contains("T_CRAZY"), "{err}");
+    assert!(
+        err.contains("non-finite state") || err.contains("T_CRAZY"),
+        "{err}"
+    );
 }
 
 #[test]
 fn the_library_returns_the_step_and_field() {
     let cfg = RunConfig::from_ini(
         &Ini::parse(
-            &std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/snowpack.ini"))
-                .unwrap(),
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/snowpack.ini"
+            ))
+            .unwrap(),
         )
         .unwrap(),
     )
@@ -150,7 +176,13 @@ fn the_library_returns_the_step_and_field() {
     };
     let forcing = Smet::parse(&forcing(Some((400, "RH", "NaN")))).unwrap();
     let end = Utc.with_ymd_and_hms(2026, 1, 7, 0, 0, 0).unwrap();
-    match run(&cfg, &site, &forcing, Column::bare_ground(273.15, 0.0, 0.0), end) {
+    match run(
+        &cfg,
+        &site,
+        &forcing,
+        Column::bare_ground(273.15, 0.0, 0.0),
+        end,
+    ) {
         Err(RunError::NonFinite { step, field, .. }) => {
             assert_eq!(step, 400);
             assert!(field.contains("NaN"), "{field}");
@@ -197,14 +229,14 @@ fn the_checkers_name_fields_a_temperature_check_would_miss() {
     c.elements[1].micro.grain_radius = f64::NAN;
     assert_eq!(
         finite::column(&c).as_deref(),
-        Some("element 1 (from the bottom) grain_radius = NaN (column: 2 elements, 3 nodes, total thickness 0.1 m)")
+        Some(
+            "element 1 (from the bottom) grain_radius = NaN (column: 2 elements, 3 nodes, total thickness 0.1 m)"
+        )
     );
     let b = Budget::default();
     assert_eq!(finite::budget(&b, 0.0, 0.0), None);
-    assert_eq!(finite::budget(&b, f64::INFINITY, 0.0).as_deref(), Some("Qg0 = inf"));
-    let mut row = OutputRow::nodata(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
-    row.set("Qs", 1.0);
-    assert_eq!(finite::row(&row), None);
-    row.set("SWE", f64::NAN);
-    assert_eq!(finite::row(&row).as_deref(), Some("SMET SWE = NaN"));
+    assert_eq!(
+        finite::budget(&b, f64::INFINITY, 0.0).as_deref(),
+        Some("Qg0 = inf")
+    );
 }

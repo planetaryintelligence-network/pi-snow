@@ -96,6 +96,33 @@ pub enum WetGrainGrowth {
     Brun1989,
 }
 
+/// What happens when sublimation takes the top element's last ice
+/// (engine-finite-guard-v1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SublimationMeltOut {
+    /// The element's thickness is scaled to zero and it stays until phase
+    /// change removes it; its liquid water leaves with no term, and the next
+    /// conduction solve meets a zero-thickness element, which leaves one NaN
+    /// node when the column empties (Phase 2).
+    #[default]
+    Phase2,
+    /// The element is removed at once with its top node; its liquid water is
+    /// counted as runoff.
+    RemoveElement,
+}
+
+/// How the surface energy balance is linearised for the implicit solve
+/// (engine-finite-guard-v1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SurfaceLinearisation {
+    /// Finite-difference slope, capped at zero (Phase 2).
+    #[default]
+    Phase2,
+    /// The finite-difference slope, but never shallower than the emitted
+    /// longwave's own, -4 eps sigma T^3, which the budget always contains.
+    RadiativeFloor,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
@@ -105,6 +132,8 @@ pub struct PhysicsOptions {
     pub turbulence: Turbulence,
     pub surface_layer: SurfaceLayer,
     pub wet_grain_growth: WetGrainGrowth,
+    pub sublimation_melt_out: SublimationMeltOut,
+    pub surface_linearisation: SurfaceLinearisation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +199,20 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            "SUBLIMATION_MELT_OUT" => {
+                self.sublimation_melt_out = match value {
+                    "PHASE2" => SublimationMeltOut::Phase2,
+                    "REMOVE_ELEMENT" => SublimationMeltOut::RemoveElement,
+                    _ => return Err(bad()),
+                }
+            }
+            "SURFACE_LINEARISATION" => {
+                self.surface_linearisation = match value {
+                    "PHASE2" => SurfaceLinearisation::Phase2,
+                    "RADIATIVE_FLOOR" => SurfaceLinearisation::RadiativeFloor,
+                    _ => return Err(bad()),
+                }
+            }
             "WET_GRAIN_GROWTH" => {
                 self.wet_grain_growth = match value {
                     "NONE" => WetGrainGrowth::None,
@@ -207,6 +250,32 @@ mod tests {
         assert_eq!(o.turbulence, Turbulence::FromIni);
         assert_eq!(o.surface_layer, SurfaceLayer::Phase2);
         assert_eq!(o.wet_grain_growth, WetGrainGrowth::None);
+        assert_eq!(o.sublimation_melt_out, SublimationMeltOut::Phase2);
+        assert_eq!(o.surface_linearisation, SurfaceLinearisation::Phase2);
+    }
+
+    #[test]
+    fn engine_finite_guard_values_parse() {
+        let o = PhysicsOptions::from_settings([
+            "SUBLIMATION_MELT_OUT=REMOVE_ELEMENT",
+            "SURFACE_LINEARISATION=RADIATIVE_FLOOR",
+        ])
+        .unwrap();
+        assert_eq!(o.sublimation_melt_out, SublimationMeltOut::RemoveElement);
+        assert_eq!(
+            o.surface_linearisation,
+            SurfaceLinearisation::RadiativeFloor
+        );
+        assert_eq!(
+            PhysicsOptions::from_settings([
+                "SUBLIMATION_MELT_OUT=PHASE2",
+                "SURFACE_LINEARISATION=PHASE2"
+            ])
+            .unwrap(),
+            PhysicsOptions::default()
+        );
+        assert!(PhysicsOptions::from_settings(["SUBLIMATION_MELT_OUT=DROP"]).is_err());
+        assert!(PhysicsOptions::from_settings(["SURFACE_LINEARISATION=CLAMP"]).is_err());
     }
 
     #[test]

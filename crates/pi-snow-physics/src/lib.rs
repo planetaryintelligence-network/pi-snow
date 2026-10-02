@@ -17,6 +17,7 @@ pub mod solar;
 pub mod stability;
 pub mod surface;
 pub mod surface_layer;
+pub mod surface_numerics;
 pub mod thermal;
 pub mod turbulence;
 pub mod water;

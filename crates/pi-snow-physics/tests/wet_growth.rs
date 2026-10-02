@@ -48,3 +48,26 @@ fn dry_dendritic_or_unrounded_grains_do_not_grow() {
         assert_eq!(m.grain_radius, 0.15e-3, "lwc {lwc} d {d} s {s}");
     }
 }
+
+#[test]
+fn ten_days_of_ten_minute_steps_give_the_closed_form_radius() {
+    // Review N8: integrating step by step at constant L must land on
+    // v0 + v' t with t in seconds; a days-for-seconds slip (Vionnet's Table 2
+    // caption) would miss by a factor of 86,400.
+    let (dt, steps, lwc) = (600.0, 1440, 5.0);
+    let mut m = rounded(0.15e-3);
+    for _ in 0..steps {
+        wet_growth::step(&mut m, lwc, dt);
+    }
+    let v0 = 4.0 / 3.0 * std::f64::consts::PI * 0.15_f64.powi(3);
+    let v = v0 + wet_growth::rate_mm3_per_s(lwc) * dt * steps as f64;
+    let r_mm = (3.0 * v / (4.0 * std::f64::consts::PI)).cbrt();
+    assert!(
+        (1e3 * m.grain_radius - r_mm).abs() < 1e-9,
+        "{} {}",
+        1e3 * m.grain_radius,
+        r_mm
+    );
+    // About 0.257 mm after ten wet days at 5 %: d grows from 0.30 to about 0.51 mm.
+    assert!((r_mm - 0.2565).abs() < 5e-4, "{r_mm}");
+}

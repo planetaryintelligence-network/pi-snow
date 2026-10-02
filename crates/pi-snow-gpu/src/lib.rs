@@ -9,7 +9,9 @@
 pub mod stepper;
 pub mod unit;
 pub mod batch;
+pub mod forcing;
 pub mod gpu;
+pub mod grid;
 pub mod sha256;
 pub mod lockstep;
 pub mod mo;

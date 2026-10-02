@@ -17,6 +17,9 @@ pub struct ColumnInput<'a> {
     pub site: &'a Site,
     pub start: Column,
     pub rows: Vec<ForcingRow>,
+    /// Write a PRO profile only at these output times (Unix seconds); `None` writes one
+    /// at every output step, as `pi-snow` does.
+    pub profile_times: Option<std::collections::HashSet<i64>>,
 }
 
 /// What became of one column.
@@ -26,6 +29,20 @@ pub struct ColumnResult {
     pub max_elements: i32,
     /// `None` when the column ran to its end.
     pub failure: Option<String>,
+    /// At every 12:00 UTC output: time and HS, SWE, TSS, liquid water, element count,
+    /// summed as the kernel's grid mode sums them (the G2 determinism check).
+    pub daily: Vec<(i64, [f64; 5])>,
+}
+
+/// The grid mode's daily fields from a rebuilt column (same summation order).
+pub fn daily_fields(c: &Column) -> [f64; 5] {
+    [
+        c.snow_height(),
+        c.swe(),
+        *c.node_temperature.last().unwrap(),
+        c.liquid_water(),
+        c.elements.len() as f64,
+    ]
 }
 
 fn nan_or(x: Option<f64>) -> f64 {
@@ -117,6 +134,7 @@ pub fn run_hourly(
     batch.upload_forcing(gpu, &ft, &fv)?;
 
     let mut writers: Vec<SeasonWriter> = inputs.iter().map(|i| SeasonWriter::new(i.site)).collect();
+    let mut daily: Vec<Vec<(i64, [f64; 5])>> = vec![Vec::new(); b];
     let mut upto = inputs.iter().map(|i| i.start.elements.len()).max().unwrap_or(0);
     loop {
         batch.advance(gpu, rows, usize::MAX, 0, 0)?;
@@ -145,7 +163,12 @@ pub fn run_hourly(
                     l.tsg,
                     options,
                 );
-                writers[c].push_parts(row, t, &column, options, true);
+                if t.timestamp() % 86_400 == 43_200 {
+                    daily[c].push((t.timestamp(), daily_fields(&column)));
+                }
+                let with_profile =
+                    inputs[c].profile_times.as_ref().is_none_or(|k| k.contains(&t.timestamp()));
+                writers[c].push_parts(row, t, &column, options, with_profile);
             }
         }
         if finished {
@@ -154,7 +177,7 @@ pub fn run_hourly(
     }
     batch.download(gpu, &mut host, upto)?;
     let mut out = Vec::with_capacity(b);
-    for (c, (w, i)) in writers.into_iter().zip(inputs).enumerate() {
+    for (c, ((w, i), d)) in writers.into_iter().zip(inputs).zip(daily).enumerate() {
         let failure = match host.fail[c] {
             0 => None,
             gpu::FAIL_CRAZY => Some(format!(
@@ -172,6 +195,7 @@ pub fn run_hourly(
             steps: host.steps[c],
             max_elements: host.maxn[c],
             failure,
+            daily: d,
         });
     }
     Ok(out)

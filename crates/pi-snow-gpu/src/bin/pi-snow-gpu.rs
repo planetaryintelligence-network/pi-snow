@@ -3,6 +3,12 @@
 //! ```text
 //! pi-snow-gpu batch ...                                    pi-snow batch's interface (src/batch.rs)
 //! pi-snow-gpu lockstep --list FILE --from R --to R --out JSON   G1a on unit directories
+//! pi-snow-gpu grid --forcing DIR --ini TEMPLATE --pixels FILE --batch B --out DIR
+//!                [--precision F64|MIX] [--nmax N] [--threads T]   grid season, daily fields (G2)
+//! pi-snow-gpu write-units --forcing DIR --ini TEMPLATE --pixels FILE --out DIR
+//!                unit directories (INI, 10-minute SMET, SNO) for pi-snow and batch (G1c, G2)
+//! pi-snow-gpu cpu-grid --forcing DIR --ini TEMPLATE --pixels FILE --threads T --out JSON
+//!                the CPU stepper on grid pixels, no output: physics-only CPU cost (G2)
 //! pi-snow-gpu cpu-unit <ini> <end>                         CPU stepper on one unit (G0)
 //! pi-snow-gpu dev-lockstep <columns> <days> <from> <to> [variant]  lockstep, synthetic
 //! pi-snow-gpu dev-compare <columns> <days> <dir> [mix]     GPU vs CPU files, synthetic
@@ -24,6 +30,9 @@ fn main() -> Result<()> {
         Some("batch") => pi_snow_gpu::batch::main(&args[2..]),
         Some("cpu-unit") => cpu_unit(&args[2..]),
         Some("lockstep") => units_lockstep(&args[2..]),
+        Some("grid") => grid(&args[2..]),
+        Some("write-units") => write_units(&args[2..]),
+        Some("cpu-grid") => cpu_grid(&args[2..]),
         Some("dev-lockstep") => dev_lockstep(&args[2..]),
         Some("dev-compare") => dev_compare(&args[2..]),
         _ => bail!("usage: see the module documentation"),
@@ -66,7 +75,7 @@ fn dev_lockstep(args: &[String]) -> Result<()> {
         .sites
         .iter()
         .zip(s.rows)
-        .map(|(site, rows)| ColumnInput { cfg: &cfg, site, start: synth::bare(site), rows })
+        .map(|(site, rows)| ColumnInput { cfg: &cfg, site, start: synth::bare(site), rows, profile_times: None })
         .collect();
     let gpu = Gpu::new(Precision::F64)?;
     eprintln!("{}", gpu.build.to_json());
@@ -106,7 +115,7 @@ fn dev_compare(args: &[String]) -> Result<()> {
         .sites
         .iter()
         .zip(s.rows)
-        .map(|(site, rows)| ColumnInput { cfg: &cfg, site, start: synth::bare(site), rows })
+        .map(|(site, rows)| ColumnInput { cfg: &cfg, site, start: synth::bare(site), rows, profile_times: None })
         .collect();
     let started = std::time::Instant::now();
     let results = runner::run_hourly(&gpu, &inputs, NMAX, &options)?;
@@ -132,7 +141,7 @@ fn units_lockstep(args: &[String]) -> Result<()> {
     }
     let inputs: Vec<ColumnInput> = loaded
         .iter()
-        .map(|(u, rows)| ColumnInput { cfg: &u.cfg, site: &u.site, start: u.start.clone(), rows: rows.clone() })
+        .map(|(u, rows)| ColumnInput { cfg: &u.cfg, site: &u.site, start: u.start.clone(), rows: rows.clone(), profile_times: None })
         .collect();
     let gpu = Gpu::new(parsed.precision)?;
     let started = std::time::Instant::now();
@@ -147,5 +156,125 @@ fn units_lockstep(args: &[String]) -> Result<()> {
     let tmp = out.with_extension("partial");
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, &out)?;
+    Ok(())
+}
+
+/// `--name value` options, each required once.
+fn options(args: &[String], names: &[&str]) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if !names.contains(&a.as_str()) {
+            bail!("unknown option {a:?}");
+        }
+        let v = it.next().with_context(|| format!("{a} needs a value"))?;
+        if out.insert(a.clone(), v.clone()).is_some() {
+            bail!("{a} given twice");
+        }
+    }
+    Ok(out)
+}
+
+/// A file of pixel indices, one per line (positions in pixels.tsv).
+fn read_indices(path: &str) -> Result<Vec<usize>> {
+    std::fs::read_to_string(path)?
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| Ok(l.trim().parse::<usize>()?))
+        .collect()
+}
+
+fn grid(args: &[String]) -> Result<()> {
+    let o = options(args, &["--forcing", "--ini", "--pixels", "--batch", "--out", "--precision", "--nmax", "--threads"])?;
+    let get = |k: &str| o.get(k).cloned().with_context(|| format!("{k} is required"));
+    let precision = match o.get("--precision").map(String::as_str).unwrap_or("F64") {
+        "F64" => Precision::F64,
+        "MIX" => Precision::Mix,
+        other => bail!("bad precision {other}"),
+    };
+    let args = pi_snow_gpu::grid::GridArgs {
+        forcing_dir: PathBuf::from(get("--forcing")?),
+        ini_template: PathBuf::from(get("--ini")?),
+        pixels: read_indices(&get("--pixels")?)?,
+        batch: get("--batch")?.parse()?,
+        nmax: o.get("--nmax").map(|s| s.parse()).transpose()?.unwrap_or(NMAX),
+        out_dir: PathBuf::from(get("--out")?),
+        threads: o.get("--threads").map(|s| s.parse()).transpose()?.unwrap_or(1),
+    };
+    let gpu = Gpu::new(precision)?;
+    pi_snow_gpu::grid::run(&gpu, &args)
+}
+
+fn write_units(args: &[String]) -> Result<()> {
+    use pi_snow_gpu::forcing;
+    let o = options(args, &["--forcing", "--ini", "--pixels", "--out"])?;
+    let get = |k: &str| o.get(k).cloned().with_context(|| format!("{k} is required"));
+    let dir = PathBuf::from(get("--forcing")?);
+    let pixels = forcing::read_pixels(&dir.join("pixels.tsv"))?;
+    let template = std::fs::read_to_string(get("--ini")?)?;
+    let out = PathBuf::from(get("--out")?);
+    let mut f = std::fs::File::open(dir.join("forcing.f32"))?;
+    let mut list = String::new();
+    for i in read_indices(&get("--pixels")?)? {
+        let p = &pixels[i];
+        let h = forcing::hourly_forcing(&forcing::read_hourly(&mut f, i)?)?;
+        let rows = forcing::expand(&h, 1, forcing::HOURS - 1);
+        let unit = out.join(&p.key);
+        std::fs::create_dir_all(unit.join("input"))?;
+        std::fs::write(unit.join("snowpack.ini"), forcing::ini_text(&template, &p.key)?)?;
+        std::fs::write(unit.join("input").join(format!("{}.smet", p.key)), forcing::smet_text(p, &rows))?;
+        std::fs::write(unit.join("input").join(format!("{}.sno", p.key)), forcing::sno_text(p))?;
+        list.push_str(&format!("{}\t{}\n", unit.display(), rows.last().unwrap().t.format("%Y-%m-%dT%H:%M")));
+    }
+    std::fs::write(out.join("units.list"), list)?;
+    Ok(())
+}
+
+fn cpu_grid(args: &[String]) -> Result<()> {
+    use pi_snow_gpu::forcing;
+    use pi_snow_io::ini::{Ini, RunConfig};
+    let o = options(args, &["--forcing", "--ini", "--pixels", "--threads", "--out"])?;
+    let get = |k: &str| o.get(k).cloned().with_context(|| format!("{k} is required"));
+    let dir = PathBuf::from(get("--forcing")?);
+    let pixels = forcing::read_pixels(&dir.join("pixels.tsv"))?;
+    let cfg = RunConfig::from_ini(&Ini::parse(&forcing::ini_text(&std::fs::read_to_string(get("--ini")?)?, "px")?)?)?;
+    let indices = read_indices(&get("--pixels")?)?;
+    let threads: usize = get("--threads")?.parse()?;
+    let options = PhysicsOptions::default();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let started = std::time::Instant::now();
+    let per: Vec<(usize, f64, usize)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads.max(1))
+            .map(|_| {
+                s.spawn(|| -> Result<Vec<(usize, f64, usize)>> {
+                    let mut f = std::fs::File::open(dir.join("forcing.f32"))?;
+                    let mut mine = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&i) = indices.get(k) else { break };
+                        let p = &pixels[i];
+                        let site = p.site()?;
+                        let rows = forcing::expand(&forcing::hourly_forcing(&forcing::read_hourly(&mut f, i)?)?, 1, forcing::HOURS - 1);
+                        let t = std::time::Instant::now();
+                        let mut st = stepper::Stepper::new(&cfg, &options, &site, pi_snow_core::Column::bare_ground(pi_snow_core::constants::T_MELT, site.slope_angle, site.slope_azimuth))?;
+                        for r in &rows {
+                            if let stepper::Outcome::Advanced { output: true } = st.step(r)? {
+                                st.acc = stepper::Accum::default();
+                            }
+                        }
+                        mine.push((i, t.elapsed().as_secs_f64(), st.column.elements.len()));
+                    }
+                    Ok(mine)
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap().unwrap()).collect()
+    });
+    let wall = started.elapsed().as_secs_f64();
+    let body: Vec<String> = per.iter().map(|(i, s, n)| format!("[{i}, {s:.6}, {n}]")).collect();
+    std::fs::write(
+        get("--out")?,
+        format!("{{\"threads\": {threads}, \"wall_seconds\": {wall:.3}, \"columns\": {}, \"per_column\": [{}]}}\n", per.len(), body.join(", ")),
+    )?;
     Ok(())
 }

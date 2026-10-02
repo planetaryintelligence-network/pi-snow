@@ -34,6 +34,11 @@ pub struct Job {
 
 pub struct Args {
     pub report: Option<PathBuf>,
+    /// Also write `<station>.daily.tsv` (the 12:00 UTC fields, exact) into this directory.
+    pub daily_out: Option<PathBuf>,
+    /// `STATION<TAB>YYYY-MM-DDTHH:MM` lines: write PRO profiles only at those times for
+    /// the stations listed (others keep every profile). Not a `pi-snow` option.
+    pub profile_times: Option<PathBuf>,
     pub precision: Precision,
     pub nmax: usize,
     pub jobs: Vec<Job>,
@@ -47,7 +52,7 @@ pub fn parse_args(args: &[String]) -> Result<Args> {
 pub fn parse_args_with(args: &[String], extra: &[&str]) -> Result<(Args, Vec<(String, String)>)> {
     let mut extras = Vec::new();
     let mut end: Option<DateTime<Utc>> = None;
-    let (mut report, mut list) = (None, None);
+    let (mut report, mut list, mut daily_out, mut profile_times) = (None, None, None, None);
     let mut precision = Precision::F64;
     let mut nmax = 2048usize;
     let mut dirs = Vec::new();
@@ -61,6 +66,8 @@ pub fn parse_args_with(args: &[String], extra: &[&str]) -> Result<(Args, Vec<(St
             "-e" => end = Some(parse_end(value("-e")?)?),
             "--report" => report = Some(PathBuf::from(value("--report")?)),
             "--list" => list = Some(PathBuf::from(value("--list")?)),
+            "--daily-out" => daily_out = Some(PathBuf::from(value("--daily-out")?)),
+            "--profile-times" => profile_times = Some(PathBuf::from(value("--profile-times")?)),
             "--precision" => {
                 precision = match value("--precision")?.as_str() {
                     "F64" => Precision::F64,
@@ -109,7 +116,7 @@ pub fn parse_args_with(args: &[String], extra: &[&str]) -> Result<(Args, Vec<(St
     if jobs.is_empty() {
         bail!("usage: pi-snow-gpu batch [-e END] [--list FILE] [--report FILE] [UNIT_DIR]...");
     }
-    Ok((Args { report, precision, nmax, jobs }, extras))
+    Ok((Args { report, daily_out, profile_times, precision, nmax, jobs }, extras))
 }
 
 /// Refusals beyond `pi-snow`'s own (plan.md section 8).
@@ -186,7 +193,28 @@ pub fn load(job: &Job) -> Result<(Unit, Vec<crate::stepper::ForcingRow>)> {
 }
 
 /// Run every job; returns one report per job, in job order.
-pub fn run(gpu: &Gpu, jobs: &[Job], nmax: usize) -> Result<Vec<UnitReport>> {
+fn read_profile_times(path: &Path) -> Result<std::collections::HashMap<String, std::collections::HashSet<i64>>> {
+    let mut out: std::collections::HashMap<String, std::collections::HashSet<i64>> = Default::default();
+    for (n, line) in std::fs::read_to_string(path)?.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (station, t) = line
+            .split_once('\t')
+            .with_context(|| format!("{}:{}: expected STATION<TAB>TIME", path.display(), n + 1))?;
+        out.entry(station.to_string()).or_default().insert(parse_end(t.trim())?.timestamp());
+    }
+    Ok(out)
+}
+
+pub fn run(
+    gpu: &Gpu,
+    jobs: &[Job],
+    nmax: usize,
+    daily_out: Option<&Path>,
+    profile_times: Option<&Path>,
+) -> Result<Vec<UnitReport>> {
+    let times = profile_times.map(read_profile_times).transpose()?;
     let options = PhysicsOptions::default();
     let mut reports: Vec<UnitReport> = jobs
         .iter()
@@ -223,7 +251,13 @@ pub fn run(gpu: &Gpu, jobs: &[Job], nmax: usize) -> Result<Vec<UnitReport>> {
             .iter()
             .map(|&p| {
                 let (_, u, rows) = &loaded[p];
-                ColumnInput { cfg: &u.cfg, site: &u.site, start: u.start.clone(), rows: rows.clone() }
+                ColumnInput {
+                    cfg: &u.cfg,
+                    site: &u.site,
+                    start: u.start.clone(),
+                    rows: rows.clone(),
+                    profile_times: times.as_ref().and_then(|m| m.get(&u.site.station_id).cloned()),
+                }
             })
             .collect();
         let results = match runner::run_hourly(gpu, &inputs, nmax, &options) {
@@ -247,6 +281,14 @@ pub fn run(gpu: &Gpu, jobs: &[Job], nmax: usize) -> Result<Vec<UnitReport>> {
             if let Err(e) = write_outputs(u, &r.output.smet, &r.output.pro) {
                 rep.error = Some(format!("{e:#}"));
             }
+            if let Some(dir) = daily_out {
+                let mut text = String::from("t\tHS\tSWE\tTSS\twater\tn\n");
+                for (t, f) in &r.daily {
+                    text.push_str(&format!("{t}\t{:?}\t{:?}\t{:?}\t{:?}\t{:?}\n", f[0], f[1], f[2], f[3], f[4]));
+                }
+                std::fs::create_dir_all(dir)?;
+                std::fs::write(dir.join(format!("{}.daily.tsv", u.site.station_id)), text)?;
+            }
         }
     }
     Ok(reports)
@@ -265,7 +307,13 @@ pub fn main(args: &[String]) -> Result<()> {
     let parsed = parse_args(args)?;
     let gpu = Gpu::new(parsed.precision)?;
     let started = std::time::Instant::now();
-    let reports = run(&gpu, &parsed.jobs, parsed.nmax)?;
+    let reports = run(
+        &gpu,
+        &parsed.jobs,
+        parsed.nmax,
+        parsed.daily_out.as_deref(),
+        parsed.profile_times.as_deref(),
+    )?;
     let wall = started.elapsed().as_secs_f64();
     if let Some(path) = &parsed.report {
         std::fs::write(path, report_json(&reports, &gpu.build, wall))

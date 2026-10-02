@@ -19,7 +19,7 @@ fn one_synthetic_day_agrees_and_counts_monin_obukhov_passes() {
         .sites
         .iter()
         .zip(s.rows)
-        .map(|(site, rows)| ColumnInput { cfg: &cfg, site, start: synth::bare(site), rows })
+        .map(|(site, rows)| ColumnInput { cfg: &cfg, site, start: synth::bare(site), rows, profile_times: None })
         .collect();
     let tally = lockstep::run(&gpu, &inputs, 2048, 0, 3 * 144 + 1).unwrap();
     assert_eq!(tally.agreeing, tally.comparisons, "{}", tally.to_json());

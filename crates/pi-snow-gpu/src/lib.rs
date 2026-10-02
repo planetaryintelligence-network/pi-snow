@@ -8,6 +8,7 @@
 
 pub mod stepper;
 pub mod unit;
+pub mod batch;
 pub mod gpu;
 pub mod sha256;
 pub mod lockstep;

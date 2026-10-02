@@ -1,6 +1,8 @@
 //! `pi-snow-gpu`: the engine-gpu-v1 driver. Subcommands:
 //!
 //! ```text
+//! pi-snow-gpu batch ...                                    pi-snow batch's interface (src/batch.rs)
+//! pi-snow-gpu lockstep --list FILE --from R --to R --out JSON   G1a on unit directories
 //! pi-snow-gpu cpu-unit <ini> <end>                         CPU stepper on one unit (G0)
 //! pi-snow-gpu dev-lockstep <columns> <days> <from> <to> [variant]  lockstep, synthetic
 //! pi-snow-gpu dev-compare <columns> <days> <dir> [mix]     GPU vs CPU files, synthetic
@@ -19,7 +21,9 @@ const NMAX: usize = 2048;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("batch") => pi_snow_gpu::batch::main(&args[2..]),
         Some("cpu-unit") => cpu_unit(&args[2..]),
+        Some("lockstep") => units_lockstep(&args[2..]),
         Some("dev-lockstep") => dev_lockstep(&args[2..]),
         Some("dev-compare") => dev_compare(&args[2..]),
         _ => bail!("usage: see the module documentation"),
@@ -113,5 +117,35 @@ fn dev_compare(args: &[String]) -> Result<()> {
         std::fs::write(dir.join("gpu").join(format!("{id}.pro")), &r.output.pro)?;
         eprintln!("{id}: steps {} max elements {} failure {:?}", r.steps, r.max_elements, r.failure);
     }
+    Ok(())
+}
+
+fn units_lockstep(args: &[String]) -> Result<()> {
+    let (parsed, extras) = pi_snow_gpu::batch::parse_args_with(args, &["--from", "--to", "--out"])?;
+    let get = |k: &str| extras.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).with_context(|| format!("{k} is required"));
+    let from: usize = get("--from")?.parse()?;
+    let to: usize = get("--to")?.parse()?;
+    let out = PathBuf::from(get("--out")?);
+    let mut loaded = Vec::new();
+    for job in &parsed.jobs {
+        loaded.push(pi_snow_gpu::batch::load(job)?);
+    }
+    let inputs: Vec<ColumnInput> = loaded
+        .iter()
+        .map(|(u, rows)| ColumnInput { cfg: &u.cfg, site: &u.site, start: u.start.clone(), rows: rows.clone() })
+        .collect();
+    let gpu = Gpu::new(parsed.precision)?;
+    let started = std::time::Instant::now();
+    let tally = lockstep::run(&gpu, &inputs, parsed.nmax, from, to)?;
+    let text = format!(
+        "{{\"from\": {from}, \"to\": {to}, \"units\": {}, \"seconds\": {:.1}, \"engine\": {}, \"tally\": {}}}\n",
+        inputs.len(),
+        started.elapsed().as_secs_f64(),
+        gpu.build.to_json(),
+        tally.to_json()
+    );
+    let tmp = out.with_extension("partial");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &out)?;
     Ok(())
 }

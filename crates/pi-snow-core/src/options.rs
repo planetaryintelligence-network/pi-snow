@@ -74,10 +74,11 @@ pub enum SurfaceLayer {
     /// Wind at its own height, scalars at theirs, no limit on z/L (Phase 2).
     #[default]
     Phase2,
-    /// The bulk formulation at one reference height, Schlogl et al. (2017)
-    /// eqs. 1-2: the wind is first carried down to the scalar height along
-    /// the neutral logarithmic profile.
-    SingleHeightSchlogl2017,
+    /// Wind carried to the scalar height along the neutral log profile, then
+    /// the same solve at that one height (after Schlogl et al. 2017's
+    /// single-height form); drops the momentum stability correction above
+    /// the scalar height.
+    ScalarHeightNeutralWind,
     /// Wind and scalars at their own heights, with z/L at the wind height held
     /// to 0.01..2 (stable) and -100..-0.01 (unstable), CLM5 eq. 2.5.49.
     ZetaLimitClm5,
@@ -164,7 +165,7 @@ impl PhysicsOptions {
             "SURFACE_LAYER" => {
                 self.surface_layer = match value {
                     "PHASE2" => SurfaceLayer::Phase2,
-                    "SINGLE_HEIGHT_SCHLOGL2017" => SurfaceLayer::SingleHeightSchlogl2017,
+                    "SCALAR_HEIGHT_NEUTRAL_WIND" => SurfaceLayer::ScalarHeightNeutralWind,
                     "ZETA_LIMIT_CLM5" => SurfaceLayer::ZetaLimitClm5,
                     _ => return Err(bad()),
                 }
@@ -211,11 +212,11 @@ mod tests {
     #[test]
     fn engine_surface_values_parse() {
         let o = PhysicsOptions::from_settings([
-            "SURFACE_LAYER=SINGLE_HEIGHT_SCHLOGL2017",
+            "SURFACE_LAYER=SCALAR_HEIGHT_NEUTRAL_WIND",
             "WET_GRAIN_GROWTH=BRUN1989",
         ])
         .unwrap();
-        assert_eq!(o.surface_layer, SurfaceLayer::SingleHeightSchlogl2017);
+        assert_eq!(o.surface_layer, SurfaceLayer::ScalarHeightNeutralWind);
         assert_eq!(o.wet_grain_growth, WetGrainGrowth::Brun1989);
         let o = PhysicsOptions::from_settings(["SURFACE_LAYER=ZETA_LIMIT_CLM5"]).unwrap();
         assert_eq!(o.surface_layer, SurfaceLayer::ZetaLimitClm5);

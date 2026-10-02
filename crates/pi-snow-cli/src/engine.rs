@@ -147,8 +147,8 @@ pub fn run_with_options(
     };
     let scheme = match (options.surface_layer, scheme) {
         (SurfaceLayer::Phase2, s) => s,
-        (SurfaceLayer::SingleHeightSchlogl2017, Scheme::MoHoltslag) => {
-            Scheme::MoHoltslagSingleHeight
+        (SurfaceLayer::ScalarHeightNeutralWind, Scheme::MoHoltslag) => {
+            Scheme::MoHoltslagScalarHeight
         }
         (SurfaceLayer::ZetaLimitClm5, Scheme::MoHoltslag) => Scheme::MoHoltslagZetaLimited,
         _ => {

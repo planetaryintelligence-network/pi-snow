@@ -144,7 +144,7 @@ fn wet_rounded_grains_grow_only_under_brun1989() {
 #[test]
 fn both_surface_layer_values_run_and_change_the_surface() {
     let phase2 = run(&config(), &site(), &forcing(), start_column(), end()).unwrap();
-    for value in ["SINGLE_HEIGHT_SCHLOGL2017", "ZETA_LIMIT_CLM5"] {
+    for value in ["SCALAR_HEIGHT_NEUTRAL_WIND", "ZETA_LIMIT_CLM5"] {
         let options =
             PhysicsOptions::from_settings([format!("SURFACE_LAYER={value}").as_str()]).unwrap();
         let out = run_with_options(

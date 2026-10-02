@@ -10,16 +10,18 @@
 //! about 0.06, where the iteration runs away and the flux goes to zero
 //! (engine-mass-v1; pinned by `tests/turbulence_decoupling.rs`).
 //!
-//! * [`single_height`]: the bulk formulation at one reference height,
-//!   Schlogl, Lehning, Nishimura, Huwald, Cullen and Mott (2017),
-//!   Boundary-Layer Meteorol. 165, 161-180, eqs. 1-2 (p. 164), read in full.
-//!   The forcing's wind is first carried from its own height to the scalar
-//!   height along the neutral logarithmic profile, `u(z_s) = u(z_w) ln(z_s /
-//!   z0) / ln(z_w / z0)` (their u* relation with psi_m = 0). That reduction
-//!   is our choice; it leaves the neutral exchange coefficient exactly as in
-//!   Phase 2 and moves only the stability correction, which is then evaluated
-//!   at the scalar height alone. At one height the same functions keep a root
-//!   up to a bulk Richardson number of 1/0.7.
+//! * [`scalar_height`]: the wind is carried from its own height down to the
+//!   scalar height along the neutral logarithmic profile, `u(z_s) = u(z_w)
+//!   ln(z_s / z0) / ln(z_w / z0)`, and the Phase 2 iteration is then run with
+//!   both at the scalar height. This is **not** Schlogl, Lehning, Nishimura,
+//!   Huwald, Cullen and Mott (2017), Boundary-Layer Meteorol. 165, 161-180,
+//!   who solve their eqs. 1-2 (p. 164) with wind and temperature measured at
+//!   one height; it borrows their single-height form for a forcing whose wind
+//!   is at another height. Algebraically the only change from Phase 2 is that
+//!   the stability correction on momentum between z_s and z_w is dropped (the
+//!   neutral exchange coefficient is unchanged), so in stable air u* and the
+//!   fluxes can only rise. At one height the same functions keep a root up to a
+//!   bulk Richardson number of 1/0.7. The reduction and its use here are ours.
 //! * [`zeta_limited`]: wind and scalars at their own heights as in Phase 2,
 //!   with z/L at the wind height held to 0.01..2 in stable and -100..-0.01 in
 //!   unstable air at every iteration, as the Community Land Model does: CLM5
@@ -38,8 +40,10 @@ const ZETA_STABLE: (f64, f64) = (0.01, 2.0);
 const ZETA_UNSTABLE: (f64, f64) = (-100.0, -0.01);
 
 /// One reference height: the wind reduced to the scalar height under the
-/// neutral log law, then the Phase 2 iteration at that single height.
-pub fn single_height(l: &SurfaceLayer, rho: f64, mean_t: f64) -> Fluxes {
+/// neutral log law, then the Phase 2 iteration at that single height. A wind
+/// already at or below the scalar height is used as it is (only the heights
+/// are made equal), which does not occur with a 10 m wind and 2 m scalars.
+pub fn scalar_height(l: &SurfaceLayer, rho: f64, mean_t: f64) -> Fluxes {
     let wind = if l.z_wind > l.z_scalar {
         l.wind * (l.z_scalar / l.z0).ln() / (l.z_wind / l.z0).ln()
     } else {

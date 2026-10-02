@@ -4,5 +4,6 @@
 
 pub mod batch;
 pub mod engine;
+pub mod finite;
 pub mod ledger;
 pub mod unit;

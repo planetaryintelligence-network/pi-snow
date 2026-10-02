@@ -294,6 +294,14 @@ impl OutputRow {
             .unwrap_or_else(|| panic!("unknown output field {name:?}"));
         self.values[index] = Some(value);
     }
+
+    /// The first field holding a NaN or an infinity, with its value.
+    pub fn first_non_finite(&self) -> Option<(&'static str, f64)> {
+        OUTPUT_FIELDS
+            .iter()
+            .zip(self.values.iter())
+            .find_map(|(name, v)| v.filter(|x| !x.is_finite()).map(|x| (*name, x)))
+    }
 }
 
 /// Write a complete output time series file.

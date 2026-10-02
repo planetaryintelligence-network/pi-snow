@@ -63,6 +63,14 @@ pub enum RunError {
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
+    /// A NaN or infinity in the state, the surface budget or an output row
+    /// (engine-finite-guard-v1); `step` counts forcing steps from 1.
+    #[error("non-finite state at time step {step} ({time}): {field}")]
+    NonFinite {
+        step: usize,
+        time: DateTime<Utc>,
+        field: String,
+    },
 }
 
 /// Station metadata the output needs.
@@ -394,6 +402,16 @@ pub fn run_with_options(
                 });
             }
         }
+        // The comparisons above let a NaN through; this names it and stops.
+        if let Some(field) = crate::finite::column(&column)
+            .or_else(|| crate::finite::budget(&budget, qg0, deposition.buffered()))
+        {
+            return Err(RunError::NonFinite {
+                step: steps,
+                time: t,
+                field,
+            });
+        }
 
         // 10. Accumulate, and write on the hour.
         acc.n += 1.0;
@@ -416,7 +434,15 @@ pub fn run_with_options(
         let on_the_hour = t.minute() == 0 && t.second() == 0;
         if first_output || on_the_hour {
             first_output = false;
-            rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
+            let row = output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options);
+            if let Some(field) = crate::finite::row(&row) {
+                return Err(RunError::NonFinite {
+                    step: steps,
+                    time: t,
+                    field,
+                });
+            }
+            rows.push(row);
             pro_text.push_str(&pro::write_timestep(&profile(t, &column, options)));
             acc = Accum::default();
             if let Some(l) = ledger.as_mut() {

@@ -32,6 +32,10 @@ use pi_snow_core::constants::{GRAVITY, VON_KARMAN};
 pub enum Scheme {
     MoHoltslag,
     Louis,
+    /// `MoHoltslag` at one reference height (`surface_layer::single_height`).
+    MoHoltslagSingleHeight,
+    /// `MoHoltslag` with z/L bounded as CLM5 does (`surface_layer::zeta_limited`).
+    MoHoltslagZetaLimited,
 }
 
 /// The state of the surface layer at one instant.
@@ -116,6 +120,8 @@ pub fn fluxes(layer: &SurfaceLayer, scheme: Scheme) -> Fluxes {
     match scheme {
         Scheme::MoHoltslag => monin_obukhov(layer, rho, mean_t),
         Scheme::Louis => louis(layer, rho, mean_t),
+        Scheme::MoHoltslagSingleHeight => crate::surface_layer::single_height(layer, rho, mean_t),
+        Scheme::MoHoltslagZetaLimited => crate::surface_layer::zeta_limited(layer, rho, mean_t),
     }
 }
 

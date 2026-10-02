@@ -67,6 +67,34 @@ pub enum Turbulence {
     Louis1979,
 }
 
+/// How the Monin-Obukhov surface layer is solved when the INI selects
+/// `MO_HOLTSLAG` (engine-surface-v1). Only valid with that scheme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SurfaceLayer {
+    /// Wind at its own height, scalars at theirs, no limit on z/L (Phase 2).
+    #[default]
+    Phase2,
+    /// The bulk formulation at one reference height, Schlogl et al. (2017)
+    /// eqs. 1-2: the wind is first carried down to the scalar height along
+    /// the neutral logarithmic profile.
+    SingleHeightSchlogl2017,
+    /// Wind and scalars at their own heights, with z/L at the wind height held
+    /// to 0.01..2 (stable) and -100..-0.01 (unstable), CLM5 eq. 2.5.49.
+    ZetaLimitClm5,
+}
+
+/// Growth of wet rounded grains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WetGrainGrowth {
+    /// Wet rounded grains keep their size (Phase 2).
+    #[default]
+    None,
+    /// Brun (1989): grain volume grows at 1.28e-8 + 4.22e-10 L^3 mm^3 s^-1,
+    /// L the liquid water in per cent of mass, for non-dendritic grains of
+    /// sphericity 1 (Vionnet et al. 2012, Table 2).
+    Brun1989,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
@@ -74,6 +102,8 @@ pub struct PhysicsOptions {
     pub s5: S5Index,
     pub mass_report: MassReport,
     pub turbulence: Turbulence,
+    pub surface_layer: SurfaceLayer,
+    pub wet_grain_growth: WetGrainGrowth,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +161,21 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            "SURFACE_LAYER" => {
+                self.surface_layer = match value {
+                    "PHASE2" => SurfaceLayer::Phase2,
+                    "SINGLE_HEIGHT_SCHLOGL2017" => SurfaceLayer::SingleHeightSchlogl2017,
+                    "ZETA_LIMIT_CLM5" => SurfaceLayer::ZetaLimitClm5,
+                    _ => return Err(bad()),
+                }
+            }
+            "WET_GRAIN_GROWTH" => {
+                self.wet_grain_growth = match value {
+                    "NONE" => WetGrainGrowth::None,
+                    "BRUN1989" => WetGrainGrowth::Brun1989,
+                    _ => return Err(bad()),
+                }
+            }
             _ => return Err(OptionError(format!("unknown physics option {key:?}"))),
         }
         Ok(())
@@ -159,6 +204,28 @@ mod tests {
         assert_eq!(o.s5, S5Index::None);
         assert_eq!(o.mass_report, MassReport::Phase2);
         assert_eq!(o.turbulence, Turbulence::FromIni);
+        assert_eq!(o.surface_layer, SurfaceLayer::Phase2);
+        assert_eq!(o.wet_grain_growth, WetGrainGrowth::None);
+    }
+
+    #[test]
+    fn engine_surface_values_parse() {
+        let o = PhysicsOptions::from_settings([
+            "SURFACE_LAYER=SINGLE_HEIGHT_SCHLOGL2017",
+            "WET_GRAIN_GROWTH=BRUN1989",
+        ])
+        .unwrap();
+        assert_eq!(o.surface_layer, SurfaceLayer::SingleHeightSchlogl2017);
+        assert_eq!(o.wet_grain_growth, WetGrainGrowth::Brun1989);
+        let o = PhysicsOptions::from_settings(["SURFACE_LAYER=ZETA_LIMIT_CLM5"]).unwrap();
+        assert_eq!(o.surface_layer, SurfaceLayer::ZetaLimitClm5);
+        assert_eq!(
+            PhysicsOptions::from_settings(["SURFACE_LAYER=PHASE2", "WET_GRAIN_GROWTH=NONE"])
+                .unwrap(),
+            PhysicsOptions::default()
+        );
+        assert!(PhysicsOptions::from_settings(["SURFACE_LAYER=CAP"]).is_err());
+        assert!(PhysicsOptions::from_settings(["WET_GRAIN_GROWTH=YES"]).is_err());
     }
 
     #[test]

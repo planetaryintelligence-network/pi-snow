@@ -20,7 +20,9 @@
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
-use pi_snow_core::options::{GrainClassification, MassReport, S5Index, Turbulence};
+use pi_snow_core::options::{
+    GrainClassification, MassReport, S5Index, SurfaceLayer, Turbulence, WetGrainGrowth,
+};
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
@@ -37,6 +39,7 @@ use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
+use pi_snow_physics::wet_growth;
 
 use crate::ledger::{Interval, Ledger};
 
@@ -58,6 +61,8 @@ pub enum RunError {
         min: f64,
         max: f64,
     },
+    #[error("{0}")]
+    IncompatiblePhysics(&'static str),
 }
 
 /// Station metadata the output needs.
@@ -139,6 +144,18 @@ pub fn run_with_options(
         (Turbulence::Louis1979, _) => Scheme::Louis,
         (Turbulence::FromIni, Stability::MoHoltslag) => Scheme::MoHoltslag,
         (Turbulence::FromIni, Stability::Richardson) => Scheme::Louis,
+    };
+    let scheme = match (options.surface_layer, scheme) {
+        (SurfaceLayer::Phase2, s) => s,
+        (SurfaceLayer::SingleHeightSchlogl2017, Scheme::MoHoltslag) => {
+            Scheme::MoHoltslagSingleHeight
+        }
+        (SurfaceLayer::ZetaLimitClm5, Scheme::MoHoltslag) => Scheme::MoHoltslagZetaLimited,
+        _ => {
+            return Err(RunError::IncompatiblePhysics(
+                "SURFACE_LAYER other than PHASE2 needs ATMOSPHERIC_STABILITY = MO_HOLTSLAG and no TURBULENCE key",
+            ));
+        }
     };
     let density_scheme = match cfg.new_snow_density {
         NewSnowDensity::LehningNew => DensityScheme::Pahaut,
@@ -350,6 +367,9 @@ pub fn run_with_options(
                     lwc_percent: lwc,
                 };
                 metamorphism::step(&mut e.micro, &local, &mut h, dt);
+                if options.wet_grain_growth == WetGrainGrowth::Brun1989 {
+                    wet_growth::step(&mut e.micro, lwc, dt);
+                }
                 e.grain_history = grain_classification::update_history(
                     e.grain_history,
                     &e.micro,

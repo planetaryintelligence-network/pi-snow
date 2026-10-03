@@ -129,3 +129,84 @@ pub fn shortwave(column: &Column, incoming: f64, band_albedo: [f64; 3]) -> Short
 fn rate(a: f64, b: f64, temperature_c: f64) -> f64 {
     (a * temperature_c + b).max(0.0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AokiAlbedo, INITIAL_NIR, INITIAL_VIS};
+
+    fn near(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn decay_waits_for_a_complete_post_reset_day() {
+        let mut albedo = AokiAlbedo::default();
+        albedo.start_pack();
+        let mut bands = [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR];
+        for _ in 0..143 {
+            bands = albedo.advance(600.0, 0.0, 0.0, false);
+        }
+        assert_eq!(bands, [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR]);
+
+        bands = albedo.advance(600.0, 0.0, 0.0, false);
+        near(bands[0], INITIAL_VIS - 0.0203 / 144.0);
+        near(bands[1], INITIAL_NIR - 0.0358 / 144.0);
+        assert_eq!(bands[1], bands[2]);
+    }
+
+    #[test]
+    fn rates_are_floored_at_zero_below_the_table_crossing() {
+        let mut albedo = AokiAlbedo::default();
+        albedo.start_pack();
+        let mut bands = [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR];
+        for _ in 0..144 {
+            bands = albedo.advance(600.0, -30.0, 0.0, false);
+        }
+        assert_eq!(bands, [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR]);
+    }
+
+    #[test]
+    fn crossing_three_cm_resets_without_decay_on_that_step() {
+        let mut albedo = AokiAlbedo::default();
+        albedo.start_pack();
+        for _ in 0..144 {
+            albedo.advance(600.0, 0.0, 0.0, false);
+        }
+        let aged = albedo.advance(600.0, 0.0, 0.030, false);
+        assert!(aged[0] < INITIAL_VIS);
+        for _ in 0..6 {
+            albedo.advance(600.0, 0.0, 0.0, false);
+        }
+        let reset = albedo.advance(600.0, 0.0, 0.005, false);
+        assert_eq!(reset, [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR]);
+    }
+
+    #[test]
+    fn first_small_deposition_after_meltout_initializes_new_pack() {
+        let mut albedo = AokiAlbedo::default();
+        albedo.start_pack();
+        for _ in 0..144 {
+            albedo.advance(600.0, 0.0, 0.0, false);
+        }
+        albedo.end_pack();
+        let bands = albedo.advance(600.0, 0.0, 0.005, true);
+        assert_eq!(bands, [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR]);
+    }
+
+    #[test]
+    fn reset_starts_a_fresh_full_day_temperature_window() {
+        let mut albedo = AokiAlbedo::default();
+        albedo.start_pack();
+        for _ in 0..144 {
+            albedo.advance(600.0, 0.0, 0.0, false);
+        }
+        albedo.advance(600.0, 0.0, 0.035, false);
+        let mut bands = [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR];
+        for _ in 0..143 {
+            bands = albedo.advance(600.0, 0.0, 0.0, false);
+        }
+        assert_eq!(bands, [INITIAL_VIS, INITIAL_NIR, INITIAL_NIR]);
+        bands = albedo.advance(600.0, 0.0, 0.0, false);
+        near(bands[0], INITIAL_VIS - 0.0203 / 144.0);
+    }
+}

@@ -84,6 +84,16 @@ pub enum SurfaceLayer {
     ZetaLimitClm5,
 }
 
+/// Snow-surface reflectance and its aging law.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SnowAlbedo {
+    /// Vionnet et al. (2012), Table 4 (Phase 2).
+    #[default]
+    Vionnet2012,
+    /// Aoki et al. (2003), Figure 6 and Table 2, temperature-rate aging.
+    Aoki2003TempRate,
+}
+
 /// Growth of wet rounded grains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WetGrainGrowth {
@@ -131,6 +141,7 @@ pub struct PhysicsOptions {
     pub mass_report: MassReport,
     pub turbulence: Turbulence,
     pub surface_layer: SurfaceLayer,
+    pub snow_albedo: SnowAlbedo,
     pub wet_grain_growth: WetGrainGrowth,
     pub sublimation_melt_out: SublimationMeltOut,
     pub surface_linearisation: SurfaceLinearisation,
@@ -199,6 +210,13 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            "SNOW_ALBEDO" => {
+                self.snow_albedo = match value {
+                    "VIONNET2012" => SnowAlbedo::Vionnet2012,
+                    "AOKI2003_TEMP_RATE" => SnowAlbedo::Aoki2003TempRate,
+                    _ => return Err(bad()),
+                }
+            }
             "SUBLIMATION_MELT_OUT" => {
                 self.sublimation_melt_out = match value {
                     "PHASE2" => SublimationMeltOut::Phase2,
@@ -249,6 +267,7 @@ mod tests {
         assert_eq!(o.mass_report, MassReport::Phase2);
         assert_eq!(o.turbulence, Turbulence::FromIni);
         assert_eq!(o.surface_layer, SurfaceLayer::Phase2);
+        assert_eq!(o.snow_albedo, SnowAlbedo::Vionnet2012);
         assert_eq!(o.wet_grain_growth, WetGrainGrowth::None);
         assert_eq!(o.sublimation_melt_out, SublimationMeltOut::Phase2);
         assert_eq!(o.surface_linearisation, SurfaceLinearisation::Phase2);
@@ -296,6 +315,9 @@ mod tests {
         );
         assert!(PhysicsOptions::from_settings(["SURFACE_LAYER=CAP"]).is_err());
         assert!(PhysicsOptions::from_settings(["WET_GRAIN_GROWTH=YES"]).is_err());
+        let o = PhysicsOptions::from_settings(["SNOW_ALBEDO=AOKI2003_TEMP_RATE"]).unwrap();
+        assert_eq!(o.snow_albedo, SnowAlbedo::Aoki2003TempRate);
+        assert!(PhysicsOptions::from_settings(["SNOW_ALBEDO=UNKNOWN"]).is_err());
     }
 
     #[test]

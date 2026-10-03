@@ -72,7 +72,23 @@ pub fn shortwave(column: &Column, incoming: f64, pressure: f64) -> Shortwave {
     let a2 = (0.9 - 15.4 * root).max(0.3);
     let dp = d_opt.min(0.0023);
     let a3 = 346.3 * dp - 32.31 * dp.sqrt() + 0.88;
-    let band_albedo = [a1, a2, a3];
+    shortwave_with_band_albedo(column, incoming, [a1, a2, a3])
+}
+
+/// Partition shortwave with supplied surface albedos while retaining
+/// Vionnet's three-band fractions and within-pack extinction (eq. 14).
+pub fn shortwave_with_band_albedo(
+    column: &Column,
+    incoming: f64,
+    band_albedo: [f64; 3],
+) -> Shortwave {
+    let n = column.elements.len();
+    if n == 0 {
+        return Shortwave {
+            per_element: vec![0.0; n],
+            ..Shortwave::default()
+        };
+    }
     let albedo: f64 = BAND_FRACTION
         .iter()
         .zip(band_albedo)
@@ -82,7 +98,7 @@ pub fn shortwave(column: &Column, incoming: f64, pressure: f64) -> Shortwave {
     let incoming = incoming.max(0.0);
     let mut per_element = vec![0.0; n];
     // Band 3 is absorbed at the surface.
-    let surface = BAND_FRACTION[2] * (1.0 - a3) * incoming;
+    let surface = BAND_FRACTION[2] * (1.0 - band_albedo[2]) * incoming;
     let mut to_ground = 0.0;
     for band in 0..2 {
         let mut flux = BAND_FRACTION[band] * (1.0 - band_albedo[band]) * incoming;

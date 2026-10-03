@@ -8,6 +8,7 @@
 //! and what is not.
 
 pub mod albedo;
+pub mod aoki_albedo;
 pub mod atmosphere;
 pub mod grain_classification;
 pub mod metamorphism;

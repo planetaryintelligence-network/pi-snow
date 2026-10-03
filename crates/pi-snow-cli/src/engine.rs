@@ -21,7 +21,7 @@
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
 use pi_snow_core::options::{
-    GrainClassification, MassReport, S5Index, SublimationMeltOut, SurfaceLayer,
+    GrainClassification, MassReport, S5Index, SnowAlbedo, SublimationMeltOut, SurfaceLayer,
     SurfaceLinearisation, Turbulence, WetGrainGrowth,
 };
 use pi_snow_core::{Column, Element, PhysicsOptions};
@@ -29,6 +29,7 @@ use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
 use pi_snow_io::pro::{self, ElementRecord, ProHeader, ProTimestep};
 use pi_snow_io::smet::{OutputRow, Smet};
 use pi_snow_physics::albedo;
+use pi_snow_physics::aoki_albedo::{self, AokiAlbedo};
 use pi_snow_physics::atmosphere::pressure_at_altitude;
 use pi_snow_physics::grain_classification;
 use pi_snow_physics::metamorphism::{self, History, Local};
@@ -170,6 +171,13 @@ pub fn run_with_options(
             ));
         }
     };
+    if options.snow_albedo == SnowAlbedo::Aoki2003TempRate
+        && options.surface_layer != SurfaceLayer::ZetaLimitClm5
+    {
+        return Err(RunError::IncompatiblePhysics(
+            "AOKI2003_TEMP_RATE requires SURFACE_LAYER=ZETA_LIMIT_CLM5",
+        ));
+    }
     let density_scheme = match cfg.new_snow_density {
         NewSnowDensity::LehningNew => DensityScheme::Pahaut,
         NewSnowDensity::Zwart => DensityScheme::Zwart,
@@ -178,6 +186,10 @@ pub fn run_with_options(
     let pressure = pressure_at_altitude(site.altitude);
 
     let mut column = start;
+    let mut aoki_state = AokiAlbedo::default();
+    if options.snow_albedo == SnowAlbedo::Aoki2003TempRate && !column.elements.is_empty() {
+        aoki_state.start_pack();
+    }
     let mut deposition =
         Deposition::new(cfg.height_new_element, 0.5e-3 * cfg.new_snow_grain_size_mm);
     let header = ProHeader {
@@ -268,7 +280,14 @@ pub fn run_with_options(
         } else {
             (0.0, psum)
         };
+        let had_snow = !column.elements.is_empty();
+        let new_snow_density = (options.snow_albedo == SnowAlbedo::Aoki2003TempRate)
+            .then(|| density_scheme.density(&conditions));
         let deposited = deposition.add(&mut column, solid, &conditions, density_scheme);
+        let deposited_height = new_snow_density
+            .filter(|density| *density > 0.0)
+            .map_or(0.0, |density| deposited / density);
+        let new_pack = !had_snow && !column.elements.is_empty();
         acc.snow += deposited;
         acc.rain += liquid;
         interval.solid_precipitation += solid;
@@ -309,7 +328,17 @@ pub fn run_with_options(
             (surface::budget(&atm, &params, tsg), site.soil_albedo, 0.0)
         } else {
             // 3. Shortwave through the pack.
-            let absorbed = albedo::shortwave(&column, iswr, pressure);
+            let absorbed = if options.snow_albedo == SnowAlbedo::Aoki2003TempRate {
+                let bands = aoki_state.advance(
+                    cfg.step_seconds,
+                    t_surface - T_MELT,
+                    deposited_height,
+                    new_pack,
+                );
+                aoki_albedo::shortwave(&column, iswr, bands)
+            } else {
+                albedo::shortwave(&column, iswr, pressure)
+            };
             let atm = Atmosphere {
                 t_air: ta,
                 relative_humidity: rh,
@@ -431,6 +460,9 @@ pub fn run_with_options(
 
             // 9. Merge thin elements; drop anything melted to nothing.
             new_snow::merge_thin_elements(&mut column, cfg.minimum_element_length);
+            if options.snow_albedo == SnowAlbedo::Aoki2003TempRate && column.elements.is_empty() {
+                aoki_state.end_pack();
+            }
             (b, absorbed.albedo, qg0)
         };
 

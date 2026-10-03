@@ -14,6 +14,9 @@ pub struct SurfaceIteration {
     pub linearization_temperature_k: f64,
     pub a_w_m2: f64,
     pub b_w_m2_k: f64,
+    pub finite_difference_budget_f0_w_m2: f64,
+    pub finite_difference_budget_f1_w_m2: f64,
+    pub raw_finite_difference_slope_w_m2_k: f64,
     pub radiative_slope_w_m2_k: f64,
     pub solved_surface_k: f64,
     pub nonlinear_budget_w_m2: f64,
@@ -45,6 +48,8 @@ pub fn step_general(
         let input = t_lin;
         let (a, b) = linearise(atm, p, input);
         let linearization_temperature = input.min(T_MELT - 0.01);
+        let f0 = budget(atm, p, linearization_temperature).total;
+        let f1 = budget(atm, p, linearization_temperature + 0.01).total;
         used = (a, b);
         let before = column.clone();
         thermal::step_general(column, ground, a, b, sources, dt, conductivity);
@@ -70,6 +75,9 @@ pub fn step_general(
             linearization_temperature_k: t,
             a_w_m2: a,
             b_w_m2_k: b,
+            finite_difference_budget_f0_w_m2: f0,
+            finite_difference_budget_f1_w_m2: f1,
+            raw_finite_difference_slope_w_m2_k: (f1 - f0) / 0.01,
             radiative_slope_w_m2_k: -4.0 * p.emissivity * STEFAN_BOLTZMANN * t.powi(3),
             solved_surface_k,
             nonlinear_budget_w_m2,

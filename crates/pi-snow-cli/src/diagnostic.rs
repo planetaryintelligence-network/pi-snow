@@ -199,9 +199,11 @@ pub fn trace_jsonl(station: &str, report: &RunDiagnostics) -> String {
 
 fn step_json(r: &StepTrace) -> String {
     let iterations = r.surface_iterations.iter().map(|i| format!(
-        "{{\"iteration\":{},\"linearization_input_K\":{},\"linearization_K\":{},\"a_W_m2\":{},\"b_W_m2_K\":{},\"radiative_slope_W_m2_K\":{},\"solved_surface_K\":{},\"nonlinear_budget_W_m2\":{},\"surface_linearization_residual_W_m2\":{},\"conduction\":{{\"layers\":{},\"min_thickness_m\":{},\"max_thickness_m\":{},\"min_conductance_W_m2_K\":{},\"max_conductance_W_m2_K\":{},\"min_half_capacity_W_m2_K\":{},\"max_half_capacity_W_m2_K\":{},\"min_diagonal\":{},\"max_diagonal\":{},\"min_abs_off_diagonal\":{},\"max_abs_off_diagonal\":{},\"residual_linf\":{}}}}}",
+        "{{\"iteration\":{},\"linearization_input_K\":{},\"linearization_K\":{},\"a_W_m2\":{},\"b_W_m2_K\":{},\"finite_difference_budget_f0_W_m2\":{},\"finite_difference_budget_f1_W_m2\":{},\"raw_finite_difference_slope_W_m2_K\":{},\"radiative_slope_W_m2_K\":{},\"solved_surface_K\":{},\"nonlinear_budget_W_m2\":{},\"surface_linearization_residual_W_m2\":{},\"conduction\":{{\"layers\":{},\"min_thickness_m\":{},\"max_thickness_m\":{},\"min_conductance_W_m2_K\":{},\"max_conductance_W_m2_K\":{},\"min_half_capacity_W_m2_K\":{},\"max_half_capacity_W_m2_K\":{},\"min_diagonal\":{},\"max_diagonal\":{},\"min_abs_off_diagonal\":{},\"max_abs_off_diagonal\":{},\"residual_linf\":{}}}}}",
         i.iteration, number(i.linearization_input_k), number(i.linearization_temperature_k),
-        number(i.a_w_m2), number(i.b_w_m2_k), number(i.radiative_slope_w_m2_k),
+        number(i.a_w_m2), number(i.b_w_m2_k), number(i.finite_difference_budget_f0_w_m2),
+        number(i.finite_difference_budget_f1_w_m2), number(i.raw_finite_difference_slope_w_m2_k),
+        number(i.radiative_slope_w_m2_k),
         number(i.solved_surface_k), number(i.nonlinear_budget_w_m2),
         number(i.surface_linearization_residual_w_m2), i.conduction.layers, number(i.conduction.min_thickness_m),
         number(i.conduction.max_thickness_m), number(i.conduction.min_conductance_w_m2k),

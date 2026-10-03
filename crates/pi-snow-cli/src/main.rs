@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use pi_snow_cli::unit::{parse_end, parse_physics, run_unit};
+use pi_snow_cli::diagnostic::{self, DiagnosticMode};
+use pi_snow_cli::engine::RunError;
+use pi_snow_cli::unit::{parse_end, parse_physics, run_unit, run_unit_with_diagnostics};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -29,8 +31,39 @@ fn main() -> Result<()> {
     let end_text = flag("-e").context("usage: pi-snow -c <ini> -e <end>")?;
     let end = parse_end(&end_text)?;
     let physics = parse_physics(&args[1..])?;
-
-    let run = run_unit(&ini_path, end, &physics)?;
+    let trace_path = flag("--trace-report").map(PathBuf::from);
+    let outcome = if trace_path.is_some() {
+        run_unit_with_diagnostics(&ini_path, end, &physics, Some(DiagnosticMode::Trace))
+    } else {
+        run_unit(&ini_path, end, &physics)
+    };
+    let run = match outcome {
+        Ok(run) => run,
+        Err(error) => {
+            if let Some(path) = &trace_path {
+                if let Some(diagnostics) = error.downcast_ref::<RunError>().and_then(|e| match e {
+                    RunError::Crazy { partial, .. } => {
+                        partial.as_deref().and_then(|p| p.diagnostics.as_ref())
+                    }
+                    RunError::NonFinite { partial, .. } => partial.diagnostics.as_ref(),
+                    _ => None,
+                }) {
+                    let station = ini_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    std::fs::write(path, diagnostic::trace_jsonl(&station, diagnostics))?;
+                }
+            }
+            return Err(error);
+        }
+    };
+    if let Some(path) = &trace_path {
+        if let Some(diagnostics) = &run.diagnostics {
+            std::fs::write(path, diagnostic::trace_jsonl(&run.station_id, diagnostics))?;
+        }
+    }
     eprintln!(
         "pi-snow {}: {} steps for {} in {:.3} s",
         env!("CARGO_PKG_VERSION"),

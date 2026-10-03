@@ -10,6 +10,7 @@
 pub mod albedo;
 pub mod aoki_albedo;
 pub mod atmosphere;
+pub mod conduction_diagnostic;
 pub mod grain_classification;
 pub mod metamorphism;
 pub mod new_snow;
@@ -17,6 +18,7 @@ pub mod settlement;
 pub mod solar;
 pub mod stability;
 pub mod surface;
+pub mod surface_diagnostic;
 pub mod surface_layer;
 pub mod surface_numerics;
 pub mod thermal;

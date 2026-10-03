@@ -205,7 +205,7 @@ pub fn step_general(
 /// Linearise the budget about `t0`: returns `(a, b)` with `F(T) ~ a + b T`.
 /// The slope is kept non-positive: a surface that gains energy as it warms
 /// would make the implicit solve unstable, and the physical budget never does.
-fn linearise(atm: &Atmosphere, p: &SurfaceParameters, t0: f64) -> (f64, f64) {
+pub fn linearise(atm: &Atmosphere, p: &SurfaceParameters, t0: f64) -> (f64, f64) {
     const DELTA: f64 = 0.01;
     let t = t0.min(T_MELT - DELTA);
     let f0 = budget(atm, p, t).total;

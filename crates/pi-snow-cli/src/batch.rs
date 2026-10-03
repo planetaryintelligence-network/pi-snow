@@ -23,7 +23,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use pi_snow_core::PhysicsOptions;
 
-use crate::unit::{parse_end, parse_physics, run_unit};
+use crate::diagnostic::{self, DiagnosticMode, Minimum, Refusal};
+use crate::engine::RunError;
+use crate::unit::{parse_end, parse_physics, run_unit, run_unit_with_diagnostics};
 
 /// The number of worker threads `run_batch` will start.
 pub fn effective_threads(jobs: usize, units: usize) -> usize {
@@ -54,10 +56,21 @@ pub struct UnitReport {
     pub seconds: f64,
     /// `None` when the unit ran to the end.
     pub error: Option<String>,
+    pub minimum: Option<Minimum>,
+    pub refusal: Option<Refusal>,
 }
 
 /// Run `jobs` on `threads` threads, results in the order of `jobs`.
 pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<UnitReport> {
+    run_batch_with_diagnostics(jobs, physics, threads, None)
+}
+
+pub fn run_batch_with_diagnostics(
+    jobs: &[Job],
+    physics: &PhysicsOptions,
+    threads: usize,
+    diagnostic_mode: Option<DiagnosticMode>,
+) -> Vec<UnitReport> {
     let next = AtomicUsize::new(0);
     let threads = effective_threads(threads, jobs.len());
     let mut done: Vec<(usize, UnitReport)> = std::thread::scope(|scope| {
@@ -72,7 +85,7 @@ pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             let Some(job) = jobs.get(i) else { break };
-                            let report = run_job(job, physics);
+                            let report = run_job(job, physics, diagnostic_mode);
                             match &report.error {
                                 None => log(format_args!(
                                     "pi-snow batch: {} ok, {} steps in {:.3} s",
@@ -102,16 +115,28 @@ pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<
     done.into_iter().map(|(_, r)| r).collect()
 }
 
-fn run_job(job: &Job, physics: &PhysicsOptions) -> UnitReport {
+fn run_job(
+    job: &Job,
+    physics: &PhysicsOptions,
+    diagnostic_mode: Option<DiagnosticMode>,
+) -> UnitReport {
     let ini = job.unit_dir.join("snowpack.ini");
     let started = std::time::Instant::now();
-    let outcome = catch_unwind(AssertUnwindSafe(|| run_unit(&ini, job.end, physics)));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(mode) = diagnostic_mode {
+            run_unit_with_diagnostics(&ini, job.end, physics, Some(mode))
+        } else {
+            run_unit(&ini, job.end, physics)
+        }
+    }));
     let failed = |error: String| UnitReport {
         unit_dir: job.unit_dir.clone(),
         station_id: None,
         steps: 0,
         seconds: started.elapsed().as_secs_f64(),
         error: Some(error),
+        minimum: None,
+        refusal: None,
     };
     match outcome {
         Ok(Ok(run)) => UnitReport {
@@ -120,8 +145,22 @@ fn run_job(job: &Job, physics: &PhysicsOptions) -> UnitReport {
             steps: run.steps,
             seconds: run.seconds,
             error: None,
+            minimum: run.diagnostics.as_ref().and_then(|d| d.minimum),
+            refusal: run.diagnostics.as_ref().and_then(|d| d.refusal.clone()),
         },
-        Ok(Err(e)) => failed(format!("{e:#}")),
+        Ok(Err(e)) => {
+            let diag = e.downcast_ref::<RunError>().and_then(|error| match error {
+                RunError::Crazy { partial, .. } => {
+                    partial.as_deref().and_then(|p| p.diagnostics.as_ref())
+                }
+                RunError::NonFinite { partial, .. } => partial.diagnostics.as_ref(),
+                _ => None,
+            });
+            let mut report = failed(format!("{e:#}"));
+            report.minimum = diag.and_then(|d| d.minimum);
+            report.refusal = diag.and_then(|d| d.refusal.clone());
+            report
+        }
         Err(panic) => failed(match panic.downcast_ref::<String>() {
             Some(s) => format!("panic: {s}"),
             None => match panic.downcast_ref::<&str>() {
@@ -179,6 +218,7 @@ pub fn report_json(reports: &[UnitReport], threads: usize, wall_seconds: f64) ->
 struct Args {
     jobs: usize,
     report: Option<PathBuf>,
+    temperature_report: Option<PathBuf>,
     units: Vec<Job>,
 }
 
@@ -187,6 +227,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
     let mut seen_jobs = false;
     let mut end: Option<DateTime<Utc>> = None;
     let mut report = None;
+    let mut temperature_report = None;
     let mut list = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
@@ -214,6 +255,15 @@ fn parse_args(args: &[String]) -> Result<Args> {
                     bail!("--report given twice");
                 }
                 report = Some(path_value(value("--report")?, "--report")?);
+            }
+            "--temperature-report" => {
+                if temperature_report.is_some() {
+                    bail!("--temperature-report given twice");
+                }
+                temperature_report = Some(path_value(
+                    value("--temperature-report")?,
+                    "--temperature-report",
+                )?);
             }
             "--list" => {
                 if list.is_some() {
@@ -254,6 +304,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
     Ok(Args {
         jobs,
         report,
+        temperature_report,
         units,
     })
 }
@@ -292,12 +343,27 @@ pub fn main(args: &[String]) -> Result<()> {
     let physics = parse_physics(args)?;
     let parsed = parse_args(args)?;
     let started = std::time::Instant::now();
-    let reports = run_batch(&parsed.units, &physics, parsed.jobs);
+    let diagnostic_mode = parsed
+        .temperature_report
+        .as_ref()
+        .map(|_| DiagnosticMode::Minimum);
+    let reports = run_batch_with_diagnostics(&parsed.units, &physics, parsed.jobs, diagnostic_mode);
     let wall = started.elapsed().as_secs_f64();
     if let Some(path) = &parsed.report {
         std::fs::write(
             path,
             report_json(
+                &reports,
+                effective_threads(parsed.jobs, reports.len()),
+                wall,
+            ),
+        )
+        .with_context(|| path.display().to_string())?;
+    }
+    if let Some(path) = &parsed.temperature_report {
+        std::fs::write(
+            path,
+            diagnostic::minimum_report_json(
                 &reports,
                 effective_threads(parsed.jobs, reports.len()),
                 wall,

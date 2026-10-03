@@ -38,12 +38,14 @@ use pi_snow_physics::settlement::{self, Br92, Viscosity};
 use pi_snow_physics::solar;
 use pi_snow_physics::stability::{self, GrainClass, Layer};
 use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
+use pi_snow_physics::surface_diagnostic;
 use pi_snow_physics::surface_numerics;
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
 use pi_snow_physics::wet_growth;
 
+use crate::diagnostic::{Collector, DiagnosticMode, Refusal, RunDiagnostics, StepTrace};
 use crate::ledger::{Interval, Ledger};
 
 /// Marker bits kept in `Microstructure::marker`.
@@ -63,6 +65,8 @@ pub enum RunError {
         value: f64,
         min: f64,
         max: f64,
+        node: usize,
+        partial: Option<Box<RunOutput>>,
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
@@ -99,6 +103,7 @@ pub struct RunOutput {
     pub steps: usize,
     /// The mass ledger, under `MASS_REPORT=LEDGER` only.
     pub mass: Option<String>,
+    pub diagnostics: Option<RunDiagnostics>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -144,6 +149,19 @@ pub fn run_with_options(
     forcing: &Smet,
     start: Column,
     end: DateTime<Utc>,
+) -> Result<RunOutput, RunError> {
+    run_with_diagnostics(cfg, options, site, forcing, start, end, None)
+}
+
+/// The default entry point plus an explicit report-only collection mode.
+pub fn run_with_diagnostics(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    diagnostic_mode: Option<DiagnosticMode>,
 ) -> Result<RunOutput, RunError> {
     let field = |name: &'static str| {
         forcing
@@ -208,22 +226,29 @@ pub fn run_with_options(
     let mut steps = 0usize;
     let mut ledger = (options.mass_report == MassReport::Ledger).then(Ledger::new);
     let mut interval = Interval::default();
-    let make_output =
-        |rows: Vec<OutputRow>, pro_text: String, steps: usize, ledger: Option<Ledger>| RunOutput {
-            smet: pi_snow_io::smet::write_output_smet(
-                &site.station_id,
-                &site.station_name,
-                site.latitude,
-                site.longitude,
-                site.altitude,
-                site.slope_angle,
-                site.slope_azimuth,
-                &rows,
-            ),
-            pro: pro_text,
-            steps,
-            mass: ledger.map(Ledger::into_text),
-        };
+    let initial_time = forcing.rows.first().map_or(end, |r| r.timestamp);
+    let mut collector =
+        diagnostic_mode.map(|mode| Collector::new(mode, &column.node_temperature, initial_time));
+    let make_output = |rows: Vec<OutputRow>,
+                       pro_text: String,
+                       steps: usize,
+                       ledger: Option<Ledger>,
+                       diagnostics: Option<RunDiagnostics>| RunOutput {
+        smet: pi_snow_io::smet::write_output_smet(
+            &site.station_id,
+            &site.station_name,
+            site.latitude,
+            site.longitude,
+            site.altitude,
+            site.slope_angle,
+            site.slope_azimuth,
+            &rows,
+        ),
+        pro: pro_text,
+        steps,
+        mass: ledger.map(Ledger::into_text),
+        diagnostics,
+    };
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -305,6 +330,15 @@ pub fn run_with_options(
             }
         }
 
+        let mut trace_pre_thickness = Vec::new();
+        let mut trace_pre_grain_type = Vec::new();
+        let mut trace_pre_density = Vec::new();
+        let mut trace_pre_nodes = Vec::new();
+        let mut trace_post_solve_nodes = Vec::new();
+        let mut trace_sources = Vec::new();
+        let mut trace_surface_iterations = Vec::new();
+        let mut trace_shortwave = 0.0;
+
         let hs = column.snow_height();
         let params = SurfaceParameters {
             emissivity: surface::SNOW_EMISSIVITY,
@@ -349,20 +383,53 @@ pub fn run_with_options(
                 rain_rate,
             };
             // 4. Energy balance and conduction.
+            if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                trace_pre_thickness = column.elements.iter().map(|e| e.thickness).collect();
+                trace_pre_grain_type = layers(&column, options)
+                    .iter()
+                    .map(|l| l.grain_type)
+                    .collect();
+                trace_pre_density = column.elements.iter().map(Element::density).collect();
+                trace_pre_nodes = column.node_temperature.clone();
+                trace_sources = absorbed.per_element.clone();
+            }
             let before = thermal::internal_energy(&column);
             let step_surface = match options.surface_linearisation {
                 SurfaceLinearisation::Phase2 => surface::step_general,
                 SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
             };
-            let b = step_surface(
-                &mut column,
-                &atm,
-                &params,
-                Ground::Temperature(tsg),
-                &absorbed.per_element,
-                dt,
-                conductivity,
-            );
+            let ground = Ground::Temperature(tsg);
+            let b = if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                let linearise = match options.surface_linearisation {
+                    SurfaceLinearisation::Phase2 => surface::linearise,
+                    SurfaceLinearisation::RadiativeFloor => surface_numerics::linearise,
+                };
+                surface_diagnostic::step_general(
+                    &mut column,
+                    &atm,
+                    &params,
+                    ground,
+                    &absorbed.per_element,
+                    dt,
+                    conductivity,
+                    linearise,
+                    |iteration| trace_surface_iterations.push(iteration),
+                )
+            } else {
+                step_surface(
+                    &mut column,
+                    &atm,
+                    &params,
+                    ground,
+                    &absorbed.per_element,
+                    dt,
+                    conductivity,
+                )
+            };
+            if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                trace_post_solve_nodes = column.node_temperature.clone();
+                trace_shortwave = atm.absorbed_shortwave;
+            }
             let sources: f64 = absorbed.per_element.iter().sum();
             let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
 
@@ -466,15 +533,103 @@ pub fn run_with_options(
             (b, absorbed.albedo, qg0)
         };
 
-        for &t_node in &column.node_temperature {
-            if t_node < cfg.t_crazy_min || t_node > cfg.t_crazy_max {
-                return Err(RunError::Crazy {
-                    time: t,
-                    value: t_node,
-                    min: cfg.t_crazy_min,
-                    max: cfg.t_crazy_max,
-                });
+        let current_min = column
+            .node_temperature
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.is_finite())
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(node, value)| (node, *value));
+        let crazy = column
+            .node_temperature
+            .iter()
+            .enumerate()
+            .find(|(_, value)| **value < cfg.t_crazy_min || **value > cfg.t_crazy_max)
+            .map(|(node, value)| (node, *value));
+
+        if let Some(collector) = collector.as_mut() {
+            if crazy.is_none() {
+                collector.observe_minimum(t, steps, &column.node_temperature);
             }
+            if let Some((min_node, min_k)) = current_min {
+                if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                    collector.observe_trace(StepTrace {
+                        step: steps,
+                        time: t,
+                        dt_seconds: dt,
+                        air_temperature_k: ta,
+                        relative_humidity: rh,
+                        wind_m_s: vw,
+                        incoming_shortwave_horizontal_w_m2: iswr,
+                        incoming_longwave_w_m2: ilwr,
+                        pressure_pa: pressure,
+                        ground_temperature_k: tsg,
+                        z_wind_m: params.z_wind,
+                        z_scalar_m: params.z_scalar,
+                        roughness_length_m: params.z0,
+                        min_node,
+                        min_node_k: min_k,
+                        snowfall_m: solid,
+                        rain_m: liquid,
+                        deposited_kg_m2: deposited,
+                        deposition_buffer_kg_m2: deposition.buffered(),
+                        shortwave_absorbed_w_m2: trace_shortwave,
+                        internal_sources_w_m2: trace_sources,
+                        budget: [
+                            budget.olwr,
+                            budget.lwr_net,
+                            budget.sensible,
+                            budget.latent,
+                            budget.rain,
+                            budget.vapour_mass,
+                            budget.total,
+                        ],
+                        inferred_ground_flux_w_m2: qg0,
+                        pre_solve_element_thickness_m: trace_pre_thickness,
+                        pre_solve_grain_type: trace_pre_grain_type,
+                        pre_solve_density_kg_m3: trace_pre_density,
+                        pre_solve_node_temperature_k: trace_pre_nodes,
+                        post_solve_node_temperature_k: trace_post_solve_nodes,
+                        post_step_element_thickness_m: column
+                            .elements
+                            .iter()
+                            .map(|e| e.thickness)
+                            .collect(),
+                        post_step_node_temperature_k: column.node_temperature.clone(),
+                        surface_iterations: trace_surface_iterations,
+                    });
+                }
+            }
+        }
+
+        if let Some((node, t_node)) = crazy {
+            let partial = if let Some(c) = collector.as_mut() {
+                c.report.refusal = Some(Refusal {
+                    kind: "T_CRAZY",
+                    kelvin: t_node,
+                    time: t,
+                    step: steps,
+                    node,
+                    detail: format!("outside [{}, {}] K", cfg.t_crazy_min, cfg.t_crazy_max),
+                });
+                Some(Box::new(make_output(
+                    rows.clone(),
+                    pro_text.clone(),
+                    steps,
+                    ledger.take(),
+                    Some(c.report.clone()),
+                )))
+            } else {
+                None
+            };
+            return Err(RunError::Crazy {
+                time: t,
+                value: t_node,
+                min: cfg.t_crazy_min,
+                max: cfg.t_crazy_max,
+                node,
+                partial,
+            });
         }
         // The comparisons above let a NaN through. While the column holds snow,
         // stop on a non-finite state or checked budget term. Qg0 is excluded:
@@ -490,11 +645,28 @@ pub fn run_with_options(
             })
             .flatten()
         {
+            if let Some(collector) = collector.as_mut() {
+                collector.report.refusal = Some(Refusal {
+                    kind: "NONFINITE",
+                    kelvin: f64::NAN,
+                    time: t,
+                    step: steps,
+                    node: usize::MAX,
+                    detail: field.clone(),
+                });
+            }
+            let partial = make_output(
+                rows,
+                pro_text,
+                steps,
+                ledger,
+                collector.as_ref().map(|c| c.report.clone()),
+            );
             return Err(RunError::NonFinite {
                 step: steps,
                 time: t,
                 field,
-                partial: Box::new(make_output(rows, pro_text, steps, ledger)),
+                partial: Box::new(partial),
             });
         }
 
@@ -528,7 +700,13 @@ pub fn run_with_options(
             interval = Interval::default();
         }
     }
-    Ok(make_output(rows, pro_text, steps, ledger))
+    Ok(make_output(
+        rows,
+        pro_text,
+        steps,
+        ledger,
+        collector.map(|c| c.report),
+    ))
 }
 
 fn history(e: &Element) -> History {

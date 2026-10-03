@@ -359,13 +359,11 @@ mod tests {
     }
 
     #[test]
-    fn a_non_default_stability_is_refused() {
+    fn unverified_ini_modes_are_refused_before_the_gpu_runs() {
         // Inside the workspace's own target/, never the system temporary directory.
         let dir = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/test-scratch"))
             .join(format!("batch-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("input")).unwrap();
-        let ini = crate::synth::INI.replace("MO_HOLTSLAG", "RICHARDSON");
-        std::fs::write(dir.join("snowpack.ini"), ini).unwrap();
         std::fs::write(
             dir.join("input/SYN.smet"),
             "SMET 1.1 ASCII\n[HEADER]\nstation_id = SYN\nlatitude = 40.6\nlongitude = -111.6\naltitude = 2600\nnodata = -999\nfields = timestamp TA RH VW DW ISWR ILWR PSUM\n[DATA]\n2025-11-01T00:00 270 0.8 2 270 0 250 0\n",
@@ -376,9 +374,43 @@ mod tests {
             "SMET 1.1 ASCII\n[HEADER]\nstation_id = SYN\nProfileDate = 2025-11-01T00:00\nHS_Last = 0\nSlopeAngle = 0\nSlopeAzi = 0\nnSoilLayerData = 0\nnSnowLayerData = 0\nfields = timestamp Layer_Thick T Vol_Frac_I Vol_Frac_W Vol_Frac_V Vol_Frac_S Rho_S Conduc_S HeatCapac_S rg rb dd sp mk mass_hoar ne CDot metamo\n[DATA]\n",
         )
         .unwrap();
-        let u = unit::load(&dir.join("snowpack.ini")).unwrap();
-        let e = check_unit(&u).unwrap_err();
-        assert!(e.to_string().contains("MO_HOLTSLAG"), "{e}");
+
+        let cases = [
+            (
+                crate::synth::INI.replace("MO_HOLTSLAG", "RICHARDSON"),
+                "MO_HOLTSLAG",
+            ),
+            (
+                format!(
+                    "{}\n[SnowpackAdvanced]\nHN_DENSITY_MODEL = ZWART\n",
+                    crate::synth::INI
+                ),
+                "LEHNING_NEW",
+            ),
+            (
+                format!("{}\n[Snowpack]\nSW_MODE = REFLECTED\n", crate::synth::INI),
+                "SW_MODE",
+            ),
+            (
+                format!(
+                    "{}\n[SnowpackAdvanced]\nWATERTRANSPORTMODEL_SNOW = RICHARDSEQUATION\n",
+                    crate::synth::INI
+                ),
+                "WATERTRANSPORTMODEL_SNOW",
+            ),
+        ];
+        let job = Job {
+            unit_dir: dir.clone(),
+            end: parse_end("2026-01-01T00:00").unwrap(),
+        };
+        for (ini, key) in cases {
+            std::fs::write(dir.join("snowpack.ini"), ini).unwrap();
+            let error = match load(&job) {
+                Ok(_) => panic!("batch accepted an unverified INI value for {key}"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(key), "{key}: {error:#}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -10,6 +10,7 @@
 pub mod albedo;
 pub mod aoki_albedo;
 pub mod atmosphere;
+pub mod chan_albedo;
 pub mod grain_classification;
 pub mod metamorphism;
 pub mod new_snow;

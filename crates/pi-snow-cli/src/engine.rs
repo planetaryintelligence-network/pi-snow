@@ -31,6 +31,7 @@ use pi_snow_io::smet::{OutputRow, Smet};
 use pi_snow_physics::albedo;
 use pi_snow_physics::aoki_albedo::{self, AokiAlbedo};
 use pi_snow_physics::atmosphere::pressure_at_altitude;
+use pi_snow_physics::chan_albedo::{self, DepositionSeries, Slair};
 use pi_snow_physics::grain_classification;
 use pi_snow_physics::metamorphism::{self, History, Local};
 use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
@@ -66,6 +67,8 @@ pub enum RunError {
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
+    #[error("MERRA-2 deposition is missing for snow-covered step at {time}")]
+    MissingDeposition { time: DateTime<Utc> },
     /// A NaN or infinity in the state or checked surface budget while the
     /// column holds snow. `partial` contains output through the last completed
     /// output interval; `step` counts forcing steps from 1.
@@ -145,6 +148,19 @@ pub fn run_with_options(
     start: Column,
     end: DateTime<Utc>,
 ) -> Result<RunOutput, RunError> {
+    run_with_options_and_deposition(cfg, options, site, forcing, start, end, None)
+}
+
+/// Run with the hourly independent MERRA-2 record required by the Chan arm.
+pub fn run_with_options_and_deposition(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    merra2: Option<&DepositionSeries>,
+) -> Result<RunOutput, RunError> {
     let field = |name: &'static str| {
         forcing
             .field_index(name)
@@ -178,6 +194,18 @@ pub fn run_with_options(
             "AOKI2003_TEMP_RATE requires SURFACE_LAYER=ZETA_LIMIT_CLM5",
         ));
     }
+    if options.snow_albedo == SnowAlbedo::Chan2022Merra2
+        && options.surface_layer != SurfaceLayer::ZetaLimitClm5
+    {
+        return Err(RunError::IncompatiblePhysics(
+            "CHAN2022_MERRA2 requires SURFACE_LAYER=ZETA_LIMIT_CLM5",
+        ));
+    }
+    if options.snow_albedo == SnowAlbedo::Chan2022Merra2 && merra2.is_none() {
+        return Err(RunError::IncompatiblePhysics(
+            "CHAN2022_MERRA2 requires --merra2-deposition CSV",
+        ));
+    }
     let density_scheme = match cfg.new_snow_density {
         NewSnowDensity::LehningNew => DensityScheme::Pahaut,
         NewSnowDensity::Zwart => DensityScheme::Zwart,
@@ -190,6 +218,19 @@ pub fn run_with_options(
     if options.snow_albedo == SnowAlbedo::Aoki2003TempRate && !column.elements.is_empty() {
         aoki_state.start_pack();
     }
+    let chan_active = options.snow_albedo == SnowAlbedo::Chan2022Merra2;
+    let mut slair = Slair::default();
+    if chan_active && !column.elements.is_empty() {
+        slair.initialize_clean(column.swe());
+    }
+    let (
+        mut daily_snowfall,
+        mut daily_clean_deposition,
+        mut daily_bc,
+        mut daily_dust,
+        mut daily_sublimation,
+        mut daily_runoff,
+    ) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     let mut deposition =
         Deposition::new(cfg.height_new_element, 0.5e-3 * cfg.new_snow_grain_size_mm);
     let header = ProHeader {
@@ -254,6 +295,12 @@ pub fn run_with_options(
         let (_, diffuse_h) = solar::split_global(iswr_h, &sun, mid);
         let ground_albedo = if column.elements.is_empty() {
             site.soil_albedo
+        } else if chan_active {
+            let (bc, dust) = slair.near_surface_concentrations();
+            let radius_um = 0.5 * albedo::surface_optical_diameter(&column) * 1e6;
+            let (visible, _) =
+                chan_albedo::visible_albedo(column.snow_height(), radius_um, bc, dust);
+            albedo::shortwave_with_visible_band(&column, 1.0, visible).albedo
         } else {
             albedo::shortwave(&column, 1.0, pressure).albedo
         };
@@ -288,6 +335,18 @@ pub fn run_with_options(
             .filter(|density| *density > 0.0)
             .map_or(0.0, |density| deposited / density);
         let new_pack = !had_snow && !column.elements.is_empty();
+        let (bc_mass, dust_mass) = if chan_active && had_snow {
+            merra2
+                .and_then(|series| series.step_mass(mid, dt))
+                .ok_or(RunError::MissingDeposition { time: mid })?
+        } else {
+            (0.0, 0.0)
+        };
+        if chan_active {
+            daily_snowfall += deposited;
+            daily_bc += bc_mass;
+            daily_dust += dust_mass;
+        }
         acc.snow += deposited;
         acc.rain += liquid;
         interval.solid_precipitation += solid;
@@ -336,6 +395,11 @@ pub fn run_with_options(
                     new_pack,
                 );
                 aoki_albedo::shortwave(&column, iswr, bands)
+            } else if chan_active {
+                let (bc, dust) = slair.near_surface_concentrations();
+                let radius_um = 0.5 * albedo::surface_optical_diameter(&column) * 1e6;
+                let (visible, _) = chan_albedo::visible_albedo(hs, radius_um, bc, dust);
+                albedo::shortwave_with_visible_band(&column, iswr, visible)
             } else {
                 albedo::shortwave(&column, iswr, pressure)
             };
@@ -381,6 +445,9 @@ pub fn run_with_options(
             acc.runoff += pc.drained + runoff;
             interval.drained += pc.drained;
             interval.runoff += runoff;
+            if chan_active {
+                daily_runoff += pc.drained + runoff;
+            }
 
             // 6. Sublimation or deposition on the top element.
             let vapour = b.vapour_mass * dt;
@@ -423,6 +490,13 @@ pub fn run_with_options(
                 }
             }
             acc.sublimation += (-vapour).max(0.0);
+            if chan_active {
+                daily_sublimation += (-vapour).max(0.0);
+                if vapour < 0.0 {
+                    // Clean vapor deposition is applied as snowfall in Eq. 1 order.
+                    daily_clean_deposition += -vapour;
+                }
+            }
 
             // 7. Settlement.
             settlement::step(&mut column, dt, Br92);
@@ -474,6 +548,27 @@ pub fn run_with_options(
                     min: cfg.t_crazy_min,
                     max: cfg.t_crazy_max,
                 });
+            }
+        }
+
+        if chan_active {
+            if column.swe() <= 0.0 {
+                slair.clear();
+            }
+            if t.hour() == 7 && t.minute() == 0 && t.second() == 0 {
+                slair.snowfall(daily_snowfall, daily_bc, daily_dust);
+                slair.add_clean_surface_mass(daily_clean_deposition);
+                slair.sublimate(daily_sublimation);
+                slair.melt(daily_runoff);
+                slair.reconcile(column.swe());
+                (
+                    daily_snowfall,
+                    daily_clean_deposition,
+                    daily_bc,
+                    daily_dust,
+                    daily_sublimation,
+                    daily_runoff,
+                ) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             }
         }
         // The comparisons above let a NaN through. While the column holds snow,

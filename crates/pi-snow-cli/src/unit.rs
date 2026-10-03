@@ -126,6 +126,9 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
     if let Some(mass) = &out.mass {
         std::fs::write(stem.with_extension("mass.csv"), mass)?;
     }
+    if let Some(chan) = &out.chan_csv {
+        std::fs::write(stem.with_extension("chan.csv"), chan)?;
+    }
     Ok(())
 }
 

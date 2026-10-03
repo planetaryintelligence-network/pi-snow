@@ -102,6 +102,8 @@ pub struct RunOutput {
     pub steps: usize,
     /// The mass ledger, under `MASS_REPORT=LEDGER` only.
     pub mass: Option<String>,
+    /// Per-step Chan branches and daily SLAIR mass reconciliation, candidate only.
+    pub chan_csv: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -231,6 +233,10 @@ pub fn run_with_options_and_deposition(
         mut daily_sublimation,
         mut daily_runoff,
     ) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    let mut daily_branch_counts = [0usize; 3];
+    let mut chan_csv = chan_active.then(|| {
+        String::from("kind,timestamp_utc,HS_m,r_um,BC_ng_g,dust_ng_g,c_eqv_ng_g,branch,alpha_vis,layer_count,slair_mass_kg_m2,engine_swe_kg_m2,mass_drift_pre_reconcile_kg_m2,modal_branch\n")
+    });
     let mut deposition =
         Deposition::new(cfg.height_new_element, 0.5e-3 * cfg.new_snow_grain_size_mm);
     let header = ProHeader {
@@ -249,22 +255,26 @@ pub fn run_with_options_and_deposition(
     let mut steps = 0usize;
     let mut ledger = (options.mass_report == MassReport::Ledger).then(Ledger::new);
     let mut interval = Interval::default();
-    let make_output =
-        |rows: Vec<OutputRow>, pro_text: String, steps: usize, ledger: Option<Ledger>| RunOutput {
-            smet: pi_snow_io::smet::write_output_smet(
-                &site.station_id,
-                &site.station_name,
-                site.latitude,
-                site.longitude,
-                site.altitude,
-                site.slope_angle,
-                site.slope_azimuth,
-                &rows,
-            ),
-            pro: pro_text,
-            steps,
-            mass: ledger.map(Ledger::into_text),
-        };
+    let make_output = |rows: Vec<OutputRow>,
+                       pro_text: String,
+                       steps: usize,
+                       ledger: Option<Ledger>,
+                       chan_csv: Option<String>| RunOutput {
+        smet: pi_snow_io::smet::write_output_smet(
+            &site.station_id,
+            &site.station_name,
+            site.latitude,
+            site.longitude,
+            site.altitude,
+            site.slope_angle,
+            site.slope_azimuth,
+            &rows,
+        ),
+        pro: pro_text,
+        steps,
+        mass: ledger.map(Ledger::into_text),
+        chan_csv,
+    };
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -398,7 +408,29 @@ pub fn run_with_options_and_deposition(
             } else if chan_active {
                 let (bc, dust) = slair.near_surface_concentrations();
                 let radius_um = 0.5 * albedo::surface_optical_diameter(&column) * 1e6;
-                let (visible, _) = chan_albedo::visible_albedo(hs, radius_um, bc, dust);
+                let (visible, branch) = chan_albedo::visible_albedo(hs, radius_um, bc, dust);
+                let branch_index = match branch {
+                    chan_albedo::Branch::Malinka => 0,
+                    chan_albedo::Branch::Rozenberg => 1,
+                    chan_albedo::Branch::He => 2,
+                };
+                daily_branch_counts[branch_index] += 1;
+                if let Some(csv) = chan_csv.as_mut() {
+                    csv.push_str(&format!(
+                        "step,{},{:.8},{:.6},{:.6},{:.6},{:.6},{},{:.8},{},{:.8},{:.8},,\n",
+                        t.to_rfc3339(),
+                        hs,
+                        radius_um,
+                        bc,
+                        dust,
+                        chan_albedo::equivalent_bc_concentration(bc, dust),
+                        chan_albedo::branch_name(branch),
+                        visible,
+                        slair.layers.len(),
+                        slair.total_mass(),
+                        column.swe()
+                    ));
+                }
                 albedo::shortwave_with_visible_band(&column, iswr, visible)
             } else {
                 albedo::shortwave(&column, iswr, pressure)
@@ -560,7 +592,30 @@ pub fn run_with_options_and_deposition(
                 slair.add_clean_surface_mass(daily_clean_deposition);
                 slair.sublimate(daily_sublimation);
                 slair.melt(daily_runoff);
+                let engine_swe = column.swe();
+                let slair_mass = slair.total_mass();
+                let drift = slair_mass - engine_swe;
+                let max_count = daily_branch_counts.iter().copied().max().unwrap_or(0);
+                let modal = ["malinka", "rozenberg", "he"]
+                    .iter()
+                    .zip(daily_branch_counts)
+                    .filter_map(|(name, count)| (count == max_count && count > 0).then_some(*name))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                if let Some(csv) = chan_csv.as_mut() {
+                    csv.push_str(&format!(
+                        "daily,{},{:.8},,,,,,,{},{:.8},{:.8},{:.8},{}\n",
+                        t.to_rfc3339(),
+                        column.snow_height(),
+                        slair.layers.len(),
+                        slair_mass,
+                        engine_swe,
+                        drift,
+                        modal
+                    ));
+                }
                 slair.reconcile(column.swe());
+                daily_branch_counts = [0; 3];
                 (
                     daily_snowfall,
                     daily_clean_deposition,
@@ -589,7 +644,7 @@ pub fn run_with_options_and_deposition(
                 step: steps,
                 time: t,
                 field,
-                partial: Box::new(make_output(rows, pro_text, steps, ledger)),
+                partial: Box::new(make_output(rows, pro_text, steps, ledger, chan_csv.clone())),
             });
         }
 
@@ -623,7 +678,7 @@ pub fn run_with_options_and_deposition(
             interval = Interval::default();
         }
     }
-    Ok(make_output(rows, pro_text, steps, ledger))
+    Ok(make_output(rows, pro_text, steps, ledger, chan_csv))
 }
 
 fn history(e: &Element) -> History {

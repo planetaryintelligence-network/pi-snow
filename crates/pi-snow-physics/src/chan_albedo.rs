@@ -233,6 +233,10 @@ impl Slair {
                     dust_mass: 0.0,
                 },
             );
+            if self.layers.len() > MAX_LAYERS {
+                let bottom = self.layers.remove(0);
+                self.layers[0].merge(bottom);
+            }
         } else {
             let mut excess = current - swe;
             while excess > 1e-12 {
@@ -310,6 +314,10 @@ impl Slair {
             dust_mass: 0.0,
         };
     }
+
+    pub fn total_mass(&self) -> f64 {
+        self.layers.iter().map(|layer| layer.mass).sum::<f64>() + self.pending.mass
+    }
 }
 
 /// Chan et al. Eq. 10 He et al. clean-snow value; radius is in micrometres.
@@ -322,7 +330,7 @@ pub fn clean_snow_albedo(radius_um: f64) -> f64 {
 /// Chan et al. Eq. 8 and Eqs. 9-18; concentrations are ng g-1, radius µm,
 /// snow depth m. Returns the visible albedo and the branch used.
 pub fn visible_albedo(hs_m: f64, radius_um: f64, bc_ng_g: f64, dust_ng_g: f64) -> (f64, Branch) {
-    let ceqv = bc_ng_g + dust_ng_g * SIGMA_ABS_DUST / SIGMA_ABS_BC;
+    let ceqv = equivalent_bc_concentration(bc_ng_g, dust_ng_g);
     let radius = effective_radius(radius_um);
     if ceqv < 500.0 && hs_m <= 0.04 {
         return (malinka(hs_m, ceqv, radius), Branch::Malinka);
@@ -336,6 +344,18 @@ pub fn visible_albedo(hs_m: f64, radius_um: f64, bc_ng_g: f64, dust_ng_g: f64) -
     let clean = 0.980_508 - 0.013_610_4 * log_r - 0.019_541_6 * log_r * log_r;
     let darkening = 0.003_014_70 * ceqv.powf(0.468_312 * radius.powf(0.127_961));
     ((clean - darkening).clamp(0.0, 1.0), Branch::He)
+}
+
+pub fn equivalent_bc_concentration(bc_ng_g: f64, dust_ng_g: f64) -> f64 {
+    bc_ng_g + dust_ng_g * SIGMA_ABS_DUST / SIGMA_ABS_BC
+}
+
+pub fn branch_name(branch: Branch) -> &'static str {
+    match branch {
+        Branch::Malinka => "malinka",
+        Branch::Rozenberg => "rozenberg",
+        Branch::He => "he",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

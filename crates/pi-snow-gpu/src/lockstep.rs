@@ -19,10 +19,14 @@ pub const ACC_SCALE: f64 = 1.0;
 pub const REL_TOL: f64 = 1e-9;
 
 pub fn agrees(g: f64, c: f64, scale: f64) -> bool {
+    agrees_with(g, c, scale, REL_TOL)
+}
+
+fn agrees_with(g: f64, c: f64, scale: f64, rel_tol: f64) -> bool {
     if g.to_bits() == c.to_bits() || (g.is_nan() && c.is_nan()) {
         return true;
     }
-    (g - c).abs() <= REL_TOL * c.abs().max(scale)
+    (g - c).abs() <= rel_tol * c.abs().max(scale)
 }
 
 #[derive(Default)]
@@ -38,11 +42,42 @@ pub struct Tally {
     /// Steps whose final surface budget took more than one Monin-Obukhov pass, per side.
     pub mo_multi_pass_steps_gpu: u64,
     pub mo_multi_pass_steps_cpu: u64,
+    pub marker_activated_gpu: u64,
+    pub marker_activated_cpu: u64,
+    pub marker_activation_disagreements: u64,
+    pub grain_0513_flips: u64,
+    pub grain_0513_flip_steps: u64,
+    pub hardness_0534_flips: u64,
+    pub hardness_0534_flip_steps: u64,
+    pub tolerance_site_steps: [u64; 6],
+    pub count_change_causes: [u64; 3],
+    pub count_change_events: Vec<String>,
+    pub mo_pass_histogram_gpu: Vec<u64>,
+    pub mo_pass_histogram_cpu: Vec<u64>,
+    pub rel_tol: f64,
+    pub scale_factor: f64,
     pub max_rel: f64,
     pub listed: Vec<String>,
 }
 
 const LIST_LIMIT: usize = 2000;
+
+fn json_quote(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
 
 impl Tally {
     fn compare(&mut self, what: &str, g: f64, c: f64, scale: f64, ctx: &str) {
@@ -50,10 +85,10 @@ impl Tally {
         if g.to_bits() == c.to_bits() {
             self.bitwise += 1;
         }
-        if agrees(g, c, scale) {
+        if agrees_with(g, c, scale * self.scale_factor, self.rel_tol) {
             self.agreeing += 1;
             if !(g.is_nan() || c.is_nan()) {
-                let rel = (g - c).abs() / c.abs().max(scale);
+                let rel = (g - c).abs() / c.abs().max(scale * self.scale_factor);
                 self.max_rel = self.max_rel.max(rel);
             }
         } else if self.listed.len() < LIST_LIMIT {
@@ -65,21 +100,36 @@ impl Tally {
         let mut s = String::new();
         let _ = write!(
             s,
-            "{{\"steps\": {}, \"comparisons\": {}, \"agreeing\": {}, \"bitwise\": {}, \"count_mismatch_steps\": {}, \"marker_mismatch_steps\": {}, \"outcome_mismatch_steps\": {}, \"mo_pass_mismatch_steps\": {}, \"mo_multi_pass_steps_gpu\": {}, \"mo_multi_pass_steps_cpu\": {}, \"max_rel_among_agreeing\": {:e}, \"listed\": [{}]}}",
+            "{{\"steps\": {}, \"comparisons\": {}, \"agreeing\": {}, \"bitwise\": {}, \"count_mismatch_steps\": {}, \"count_change_causes\": {{\"deposition\": {}, \"merge\": {}, \"melt_out\": {}}}, \"count_change_events\": [{}], \"marker_mismatch_steps\": {}, \"outcome_mismatch_steps\": {}, \"mo_pass_mismatch_steps\": {}, \"mo_multi_pass_steps_gpu\": {}, \"mo_multi_pass_steps_cpu\": {}, \"mo_pass_histogram_gpu\": {:?}, \"mo_pass_histogram_cpu\": {:?}, \"marker_activated_gpu\": {}, \"marker_activated_cpu\": {}, \"marker_activation_disagreements\": {}, \"grain_0513_flips\": {}, \"grain_0513_flip_steps\": {}, \"hardness_0534_flips\": {}, \"hardness_0534_flip_steps\": {}, \"tolerance_site_steps\": {{\"deposition_epsilon\": {}, \"melted_out_ice\": {}, \"refrozen_marker\": {}, \"monin_obukhov_break\": {}, \"gradient_thickness_floor\": {}, \"heat_linearisation_delta\": {}}}, \"rel_tol\": {:e}, \"scale_factor\": {:e}, \"max_rel_among_agreeing\": {:e}, \"listed\": [{}]}}",
             self.steps,
             self.comparisons,
             self.agreeing,
             self.bitwise,
             self.count_mismatch_steps,
+            self.count_change_causes[0], self.count_change_causes[1], self.count_change_causes[2],
+            self.count_change_events.iter().map(|s| json_quote(s)).collect::<Vec<_>>().join(", "),
             self.marker_mismatch_steps,
             self.outcome_mismatch_steps,
             self.mo_pass_mismatch_steps,
             self.mo_multi_pass_steps_gpu,
             self.mo_multi_pass_steps_cpu,
+            self.mo_pass_histogram_gpu,
+            self.mo_pass_histogram_cpu,
+            self.marker_activated_gpu,
+            self.marker_activated_cpu,
+            self.marker_activation_disagreements,
+            self.grain_0513_flips,
+            self.grain_0513_flip_steps,
+            self.hardness_0534_flips,
+            self.hardness_0534_flip_steps,
+            self.tolerance_site_steps[0], self.tolerance_site_steps[1], self.tolerance_site_steps[2],
+            self.tolerance_site_steps[3], self.tolerance_site_steps[4], self.tolerance_site_steps[5],
+            self.rel_tol,
+            self.scale_factor,
             self.max_rel,
             self.listed
                 .iter()
-                .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "'")))
+                .map(|l| json_quote(l))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -95,6 +145,23 @@ pub fn run(
     nmax: usize,
     from: usize,
     to: usize,
+) -> Result<Tally> {
+    run_with_tolerance(gpu, inputs, nmax, from, to, REL_TOL, 1.0)
+}
+
+/// Registered A1 development comparison. G1a continues to call `run` at its fixed tolerance.
+pub fn run_development(gpu: &Gpu, inputs: &[ColumnInput], nmax: usize, from: usize, to: usize) -> Result<Tally> {
+    run_with_tolerance(gpu, inputs, nmax, from, to, 1e-4, 1000.0)
+}
+
+fn run_with_tolerance(
+    gpu: &Gpu,
+    inputs: &[ColumnInput],
+    nmax: usize,
+    from: usize,
+    to: usize,
+    rel_tol: f64,
+    scale_factor: f64,
 ) -> Result<Tally> {
     let options = PhysicsOptions::default();
     let b = inputs.len();
@@ -123,9 +190,15 @@ pub fn run(
     }
     let mut batch = Batch::new(gpu, b, nmax, 1, 0, &k, &par)?;
     let mut host = HostState::new(b, nmax);
-    let mut tally = Tally::default();
+    let mut tally = Tally { rel_tol, scale_factor, mo_pass_histogram_gpu: vec![0; 201],
+        mo_pass_histogram_cpu: vec![0; 201], ..Tally::default() };
     let end = to.min(inputs.iter().map(|i| i.rows.len()).max().unwrap_or(0));
     for r in from..end {
+        let pre_markers = steppers.iter().map(|s| s.column.elements.iter()
+            .map(|e| e.micro.marker as u32).collect::<Vec<_>>()).collect::<Vec<_>>();
+        let pre_counts = steppers.iter().map(|s| s.column.elements.len()).collect::<Vec<_>>();
+        let pre_thin = steppers.iter().map(|s| s.column.elements.iter()
+            .any(|e| e.thickness < s.cfg.minimum_element_length)).collect::<Vec<_>>();
         // CPU state into the host buffer.
         for (c, s) in steppers.iter().enumerate() {
             host.set_column(c, &s.column)?;
@@ -165,11 +238,33 @@ pub fn run(
                 s.mo_passes
             );
             tally.steps += 1;
+            let gpu_n_now = host.n[c].max(0) as usize;
+            let cpu_n_now = s.column.elements.len();
+            if matches!(gpu.build.precision, gpu::Precision::F32 | gpu::Precision::F32K)
+                && (gpu_n_now != pre_counts[c] || cpu_n_now != pre_counts[c])
+            {
+                let raw_cause = host.count_change_cause[c] as usize;
+                let cause = if (1..=3).contains(&raw_cause) { raw_cause }
+                    else if gpu_n_now > pre_counts[c] || cpu_n_now > pre_counts[c] { 1 }
+                    else if pre_thin[c] { 2 } else { 3 };
+                tally.count_change_causes[cause - 1] += 1;
+                let cause_name = ["deposition", "merge", "melt_out"][cause - 1];
+                tally.count_change_events.push(format!(
+                    "{ctx}\tcause={cause_name}\tpre={}\tgpu={gpu_n_now}\tcpu={cpu_n_now}",
+                    pre_counts[c]));
+            }
             if host.mo_passes[c] as u32 != s.mo_passes {
                 tally.mo_pass_mismatch_steps += 1;
             }
+            tally.mo_pass_histogram_gpu[(host.mo_passes[c].max(0) as usize).min(200)] += 1;
+            tally.mo_pass_histogram_cpu[(s.mo_passes as usize).min(200)] += 1;
             tally.mo_multi_pass_steps_gpu += (host.mo_passes[c] > 1) as u64;
             tally.mo_multi_pass_steps_cpu += (s.mo_passes > 1) as u64;
+            if matches!(gpu.build.precision, gpu::Precision::F32 | gpu::Precision::F32K) {
+                for bit in 0..6 {
+                    tally.tolerance_site_steps[bit] += ((host.tolerance_flags[c] >> bit) & 1) as u64;
+                }
+            }
             let gpu_failed = host.fail[c] != 0;
             let (cpu_output, cpu_failed) = match &cpu {
                 Ok(Outcome::Advanced { output }) => (*output, false),
@@ -189,13 +284,54 @@ pub fn run(
                 bail!("CPU column {} failed at {}: {:?}", inputs[c].site.station_id, row.t, cpu.err());
             }
             let n = s.column.elements.len();
-            if host.n[c] as usize != n {
+            let gpu_n = host.n[c].max(0) as usize;
+            if gpu_n != n {
                 tally.count_mismatch_steps += 1;
                 if tally.listed.len() < LIST_LIMIT {
                     tally.listed.push(format!("{ctx}\tcount\tgpu={}\tcpu={n}", host.n[c]));
                 }
-            } else {
-                let mut marker_bad = false;
+            }
+            let common_n = gpu_n.min(n);
+            let diagnostic_precision = matches!(gpu.build.precision, gpu::Precision::F32 | gpu::Precision::F32K);
+            let classes = if diagnostic_precision {
+                let gpu_column = host.column(c, inputs[c].site.slope_angle, inputs[c].site.slope_azimuth);
+                Some((crate::stepper::grain_hardness_values(&gpu_column, &options),
+                      crate::stepper::grain_hardness_values(&s.column, &options)))
+            } else { None };
+            let mut marker_bad = false;
+            let mut grain_bad = false;
+            let mut hardness_bad = false;
+            for i in 0..common_n {
+                let e = &s.column.elements[i];
+                if host.marker[i * b + c] != e.micro.marker as u32 {
+                    marker_bad = true;
+                }
+                if diagnostic_precision {
+                    if let Some(&before) = pre_markers[c].get(i) {
+                        let gpu_active = before & 1 == 0 && host.marker[i * b + c] & 1 != 0;
+                        let cpu_active = before & 1 == 0 && e.micro.marker as u32 & 1 != 0;
+                        tally.marker_activated_gpu += gpu_active as u64;
+                        tally.marker_activated_cpu += cpu_active as u64;
+                        tally.marker_activation_disagreements += (gpu_active != cpu_active) as u64;
+                    }
+                    if let Some((gpu_classes, cpu_classes)) = &classes {
+                        if gpu_classes[i].0 != cpu_classes[i].0 {
+                            grain_bad = true;
+                            tally.grain_0513_flips += 1;
+                        }
+                        if gpu_classes[i].1 != cpu_classes[i].1 {
+                            hardness_bad = true;
+                            tally.hardness_0534_flips += 1;
+                        }
+                    }
+                }
+            }
+            tally.grain_0513_flip_steps += grain_bad as u64;
+            tally.hardness_0534_flip_steps += hardness_bad as u64;
+            if marker_bad {
+                tally.marker_mismatch_steps += 1;
+            }
+            if gpu_n == n {
                 for (i, e) in s.column.elements.iter().enumerate() {
                     let v = gpu::element_values(e);
                     for (f, x) in v.iter().enumerate() {
@@ -208,12 +344,6 @@ pub fn run(
                             &ctx,
                         );
                     }
-                    if host.marker[i * b + c] != e.micro.marker as u32 {
-                        marker_bad = true;
-                    }
-                }
-                if marker_bad {
-                    tally.marker_mismatch_steps += 1;
                 }
                 for (j, t) in s.column.node_temperature.iter().enumerate() {
                     tally.compare(&format!("T[{j}]"), host.t[j * b + c], *t, NODE_SCALE, &ctx);

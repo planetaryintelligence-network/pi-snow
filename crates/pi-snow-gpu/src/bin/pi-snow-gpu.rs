@@ -2,9 +2,10 @@
 //!
 //! ```text
 //! pi-snow-gpu batch ...                                    pi-snow batch's interface (src/batch.rs)
-//! pi-snow-gpu lockstep --list FILE --from R --to R --out JSON   G1a on unit directories
+//! pi-snow-gpu lockstep --list FILE --from R --to R --out JSON [--precision F64|F32|F32K]
+//!                                                        G1a or precision development lockstep
 //! pi-snow-gpu grid --forcing DIR --ini TEMPLATE --pixels FILE --batch B --out DIR
-//!                [--precision F64|MIX] [--nmax N] [--threads T]   grid season, daily fields (G2)
+//!                [--precision F64|MIX|F32|F32K] [--nmax N] [--threads T]   grid season, daily fields (G2)
 //! pi-snow-gpu write-units --forcing DIR --ini TEMPLATE --pixels FILE --out DIR
 //!                unit directories (INI, 10-minute SMET, SNO) for pi-snow and batch (G1c, G2)
 //! pi-snow-gpu cpu-grid --forcing DIR --ini TEMPLATE --pixels FILE --threads T --out JSON
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("batch") => pi_snow_gpu::batch::main(&args[2..]),
+        Some("cpu-marker-control") => cpu_marker_control(&args[2..]),
         Some("cpu-unit") => cpu_unit(&args[2..]),
         Some("lockstep") => units_lockstep(&args[2..]),
         Some("grid") => grid(&args[2..]),
@@ -37,6 +39,63 @@ fn main() -> Result<()> {
         Some("dev-compare") => dev_compare(&args[2..]),
         _ => bail!("usage: see the module documentation"),
     }
+}
+
+fn cpu_marker_control(args: &[String]) -> Result<()> {
+    let (parsed, extras) = pi_snow_gpu::batch::parse_args_with(args, &["--out"])?;
+    let out = extras.iter().find(|(k, _)| k == "--out").map(|(_, v)| PathBuf::from(v))
+        .context("--out is required")?;
+    let options = PhysicsOptions::default();
+    let mut steps = 0u64;
+    let mut count_change_steps = 0u64;
+    let mut marker_difference_steps = 0u64;
+    let mut marker_differences = 0u64;
+    let mut grain_flips = 0u64;
+    let mut grain_flip_steps = 0u64;
+    let mut hardness_flips = 0u64;
+    let mut hardness_flip_steps = 0u64;
+    let mut first_count_change = None;
+    for job in &parsed.jobs {
+        let (u, rows) = pi_snow_gpu::batch::load(job)?;
+        let mut base = stepper::Stepper::new(&u.cfg, &options, &u.site, u.start.clone())?;
+        let mut control = stepper::Stepper::new_marker_control(&u.cfg, &options, &u.site, u.start.clone())?;
+        for row in &rows {
+            let _ = base.step(row)?;
+            let _ = control.step(row)?;
+            steps += 1;
+            if base.column.elements.len() != control.column.elements.len() {
+                count_change_steps += 1;
+                if first_count_change.is_none() {
+                    first_count_change = Some(format!("{} {} baseline={} control={}", u.site.station_id,
+                        row.t.format("%Y-%m-%dT%H:%M:%S"), base.column.elements.len(), control.column.elements.len()));
+                }
+            }
+            let mut marker_bad = false;
+            let mut grain_bad = false;
+            let mut hardness_bad = false;
+            for (a, b) in base.column.elements.iter().zip(&control.column.elements) {
+                if a.micro.marker != b.micro.marker {
+                    marker_bad = true;
+                    marker_differences += 1;
+                }
+            }
+            let ag = stepper::grain_hardness_values(&base.column, &options);
+            let bg = stepper::grain_hardness_values(&control.column, &options);
+            for (a, b) in ag.iter().zip(&bg) {
+                if a.0 != b.0 { grain_bad = true; grain_flips += 1; }
+                if a.1 != b.1 { hardness_bad = true; hardness_flips += 1; }
+            }
+            marker_difference_steps += marker_bad as u64;
+            grain_flip_steps += grain_bad as u64;
+            hardness_flip_steps += hardness_bad as u64;
+        }
+    }
+    let first = first_count_change.map(|v| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+        .unwrap_or_else(|| "null".into());
+    std::fs::write(out, format!(
+        "{{\"units\": {}, \"steps\": {steps}, \"count_change_steps\": {count_change_steps}, \"first_count_change\": {first}, \"marker_difference_steps\": {marker_difference_steps}, \"marker_element_differences\": {marker_differences}, \"grain_0513_flips\": {grain_flips}, \"grain_0513_flip_steps\": {grain_flip_steps}, \"hardness_0534_flips\": {hardness_flips}, \"hardness_0534_flip_steps\": {hardness_flip_steps}, \"control\": {{\"melted_out_ice\": 1e-4, \"refrozen_mass_fraction\": 1e-3}}}}\n",
+        parsed.jobs.len()))?;
+    Ok(())
 }
 
 fn cpu_unit(args: &[String]) -> Result<()> {
@@ -145,7 +204,11 @@ fn units_lockstep(args: &[String]) -> Result<()> {
         .collect();
     let gpu = Gpu::new(parsed.precision)?;
     let started = std::time::Instant::now();
-    let tally = lockstep::run(&gpu, &inputs, parsed.nmax, from, to)?;
+    let tally = if matches!(parsed.precision, Precision::F32 | Precision::F32K) {
+        lockstep::run_development(&gpu, &inputs, parsed.nmax, from, to)?
+    } else {
+        lockstep::run(&gpu, &inputs, parsed.nmax, from, to)?
+    };
     let text = format!(
         "{{\"from\": {from}, \"to\": {to}, \"units\": {}, \"seconds\": {:.1}, \"engine\": {}, \"tally\": {}}}\n",
         inputs.len(),
@@ -190,6 +253,8 @@ fn grid(args: &[String]) -> Result<()> {
     let precision = match o.get("--precision").map(String::as_str).unwrap_or("F64") {
         "F64" => Precision::F64,
         "MIX" => Precision::Mix,
+        "F32" => Precision::F32,
+        "F32K" => Precision::F32K,
         other => bail!("bad precision {other}"),
     };
     let args = pi_snow_gpu::grid::GridArgs {

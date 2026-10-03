@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! pi-snow-gpu batch [--jobs N] [-e END] [--list FILE] [--report FILE]
-//!                   [--precision F64|MIX] [--nmax N] [UNIT_DIR]...
+//!                   [--precision F64|MIX|F32|F32K] [--nmax N] [UNIT_DIR]...
 //! ```
 //!
 //! Same unit directories (`snowpack.ini`, `input/<id>.smet`, `input/<id>.sno`), same
@@ -72,7 +72,9 @@ pub fn parse_args_with(args: &[String], extra: &[&str]) -> Result<(Args, Vec<(St
                 precision = match value("--precision")?.as_str() {
                     "F64" => Precision::F64,
                     "MIX" => Precision::Mix,
-                    other => bail!("--precision is F64 or MIX, not {other:?}"),
+                    "F32" => Precision::F32,
+                    "F32K" => Precision::F32K,
+                    other => bail!("--precision is F64, MIX, F32 or F32K, not {other:?}"),
                 }
             }
             "--nmax" => nmax = value("--nmax")?.parse().context("--nmax needs a number")?,

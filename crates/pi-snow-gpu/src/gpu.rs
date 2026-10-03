@@ -30,6 +30,9 @@ pub const L_COUNT: usize = 5;
 pub const P_COUNT: usize = 11;
 pub const K_COUNT: usize = 15;
 pub const D_COUNT: usize = 6;
+const K_T_CRAZY_MIN: usize = 7;
+const K_T_CRAZY_MAX: usize = 8;
+const L_TSG: usize = 4;
 pub const ROW_ABSENT: i64 = i64::MIN;
 pub const FAIL_CRAZY: i32 = 1;
 pub const FAIL_OVERFLOW: i32 = 2;
@@ -39,6 +42,8 @@ pub const BLOCK: u32 = 64;
 pub enum Precision {
     F64,
     Mix,
+    F32,
+    F32K,
 }
 
 impl Precision {
@@ -46,7 +51,92 @@ impl Precision {
         match self {
             Precision::F64 => "F64",
             Precision::Mix => "MIX",
+            Precision::F32 => "F32",
+            Precision::F32K => "F32K",
         }
+    }
+
+    fn is_f32(self) -> bool {
+        matches!(self, Precision::F32 | Precision::F32K)
+    }
+
+    fn accumulator_is_f64(self) -> bool {
+        self == Precision::F32K
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DeviceFloat {
+    F64,
+    F32,
+}
+
+/// A typed CUDA allocation backed by bytes so each precision arm can share the pointer ABI.
+struct DeviceValues {
+    raw: CudaSlice<u8>,
+    len: usize,
+    kind: DeviceFloat,
+}
+
+impl DeviceValues {
+    fn new(stream: &Arc<CudaStream>, len: usize, kind: DeviceFloat) -> Result<Self> {
+        let width = match kind { DeviceFloat::F64 => 8, DeviceFloat::F32 => 4 };
+        Ok(Self { raw: stream.alloc_zeros::<u8>(len * width)?, len, kind })
+    }
+
+    fn ptr(&self, stream: &CudaStream) -> u64 {
+        self.raw.device_ptr(stream).0
+    }
+
+    fn byte_len(&self) -> usize {
+        self.len * match self.kind { DeviceFloat::F64 => 8, DeviceFloat::F32 => 4 }
+    }
+
+    fn upload(&mut self, stream: &Arc<CudaStream>, source: &[f64], kelvin_to_celsius: bool) -> Result<()> {
+        if source.len() > self.len {
+            bail!("device upload has {} values, allocation has {}", source.len(), self.len);
+        }
+        match self.kind {
+            DeviceFloat::F64 => {
+                let values: Vec<f64> = source.iter().map(|&v| if kelvin_to_celsius { v - 273.15 } else { v }).collect();
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len() * 8)
+                };
+                stream.memcpy_htod(bytes, &mut self.raw.slice_mut(0..bytes.len()))?;
+            }
+            DeviceFloat::F32 => {
+                // Convert K to C in f64 before the cast, as registered for A1.
+                let values: Vec<f32> = source.iter().map(|&v| {
+                    (if kelvin_to_celsius { v - 273.15 } else { v }) as f32
+                }).collect();
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len() * 4)
+                };
+                stream.memcpy_htod(bytes, &mut self.raw.slice_mut(0..bytes.len()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn download(&self, stream: &Arc<CudaStream>, target: &mut [f64], celsius_to_kelvin: bool) -> Result<()> {
+        if target.len() > self.len {
+            bail!("device download requested {} values, allocation has {}", target.len(), self.len);
+        }
+        let width = match self.kind { DeviceFloat::F64 => 8, DeviceFloat::F32 => 4 };
+        let bytes = stream.clone_dtoh(&self.raw.slice(0..target.len() * width))?;
+        match self.kind {
+            DeviceFloat::F64 => for (i, chunk) in bytes.chunks_exact(8).enumerate() {
+                let mut value = f64::from_ne_bytes(chunk.try_into().unwrap());
+                if celsius_to_kelvin { value += 273.15; }
+                target[i] = value;
+            },
+            DeviceFloat::F32 => for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+                let mut value = f32::from_ne_bytes(chunk.try_into().unwrap()) as f64;
+                if celsius_to_kelvin { value += 273.15; }
+                target[i] = value;
+            },
+        }
+        Ok(())
     }
 }
 
@@ -102,8 +192,17 @@ impl Gpu {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        if precision == Precision::Mix {
-            options.push("-DPI_MIX".into());
+        match precision {
+            Precision::Mix => options.push("-DPI_MIX".into()),
+            Precision::F32 => {
+                options[0] = "--fmad=true".into();
+                options.push("-DPI_F32".into());
+            }
+            Precision::F32K => {
+                options[0] = "--fmad=true".into();
+                options.push("-DPI_F32K".into());
+            }
+            Precision::F64 => {}
         }
         let opts = CompileOptions {
             arch: Some(arch),
@@ -235,6 +334,8 @@ pub struct HostState {
     pub acc: Vec<f64>,
     pub last: Vec<f64>,
     pub mo_passes: Vec<i32>,
+    pub tolerance_flags: Vec<u32>,
+    pub count_change_cause: Vec<u32>,
 }
 
 /// Element field order of `HostState::elem`, as the kernel's `Arrays`.
@@ -275,6 +376,8 @@ impl HostState {
             acc: vec![0.0; A_COUNT * b],
             last: vec![0.0; L_COUNT * b],
             mo_passes: vec![0; b],
+            tolerance_flags: vec![0; b],
+            count_change_cause: vec![0; b],
         }
     }
 
@@ -396,23 +499,25 @@ pub struct Batch {
     pub b: usize,
     pub nmax: usize,
     pub rows: usize,
-    elem: Vec<CudaSlice<f64>>,
+    elem: Vec<DeviceValues>,
     marker: CudaSlice<u32>,
-    t: CudaSlice<f64>,
-    _scratch: Vec<CudaSlice<f64>>,
+    t: DeviceValues,
+    _scratch: Vec<DeviceValues>,
     ints: Vec<CudaSlice<i32>>,  // n, fail, first_out, has_prev, out_ready, cursor, maxn
     longs: Vec<CudaSlice<i64>>, // prev_t, steps, fail_t
-    buffer: CudaSlice<f64>,
-    acc: CudaSlice<f64>,
-    last: CudaSlice<f64>,
-    par: CudaSlice<f64>,
+    buffer: DeviceValues,
+    acc: DeviceValues,
+    last: DeviceValues,
+    par: DeviceValues,
     pub ft: CudaSlice<i64>,
-    pub fv: CudaSlice<f64>,
-    pub daily: CudaSlice<f64>,
+    fv: DeviceValues,
+    daily_values: DeviceValues,
     pub days: usize,
     mo_passes: CudaSlice<i32>,
+    tolerance_flags: CudaSlice<u32>,
+    count_change_cause: CudaSlice<u32>,
     arrays: CudaSlice<u64>,
-    k: CudaSlice<f64>,
+    k: DeviceValues,
 }
 
 impl Batch {
@@ -429,13 +534,15 @@ impl Batch {
         let s = &gpu.stream;
         let ne = nmax * b;
         let nn = (nmax + 1) * b;
+        let real_kind = if gpu.build.precision.is_f32() { DeviceFloat::F32 } else { DeviceFloat::F64 };
+        let accum_kind = if gpu.build.precision.accumulator_is_f64() { DeviceFloat::F64 } else { real_kind };
         let elem = (0..11)
-            .map(|_| s.alloc_zeros::<f64>(ne))
+            .map(|_| DeviceValues::new(s, ne, real_kind))
             .collect::<Result<Vec<_>, _>>()?;
         let marker = s.alloc_zeros::<u32>(ne)?;
-        let t = s.alloc_zeros::<f64>(nn)?;
+        let t = DeviceValues::new(s, nn, real_kind)?;
         let scratch = (0..8)
-            .map(|_| s.alloc_zeros::<f64>(nn))
+            .map(|_| DeviceValues::new(s, nn, real_kind))
             .collect::<Result<Vec<_>, _>>()?;
         let ints = (0..7)
             .map(|_| s.alloc_zeros::<i32>(b))
@@ -443,30 +550,39 @@ impl Batch {
         let longs = (0..3)
             .map(|_| s.alloc_zeros::<i64>(b))
             .collect::<Result<Vec<_>, _>>()?;
-        let buffer = s.alloc_zeros::<f64>(b)?;
-        let acc = s.alloc_zeros::<f64>(A_COUNT * b)?;
-        let last = s.alloc_zeros::<f64>(L_COUNT * b)?;
+        let buffer = DeviceValues::new(s, b, accum_kind)?;
+        let acc = DeviceValues::new(s, A_COUNT * b, accum_kind)?;
+        let last = DeviceValues::new(s, L_COUNT * b, real_kind)?;
         if par.len() != P_COUNT * b {
             bail!("column parameters: {} values for {} columns", par.len(), b);
         }
-        let par = s.clone_htod(par)?;
+        let mut par_device = DeviceValues::new(s, par.len(), real_kind)?;
+        par_device.upload(s, par, false)?;
         let ft = s.alloc_zeros::<i64>(rows.max(1) * b)?;
-        let fv = s.alloc_zeros::<f64>(rows.max(1) * F_COUNT * b)?;
-        let daily = s.alloc_zeros::<f64>(days.max(1) * D_COUNT * b)?;
-        let k = s.clone_htod(&k[..])?;
+        let fv = DeviceValues::new(s, rows.max(1) * F_COUNT * b, real_kind)?;
+        let daily_values = DeviceValues::new(s, days.max(1) * D_COUNT * b, real_kind)?;
+        let mut constants = k.to_vec();
+        if gpu.build.precision.is_f32() {
+            constants[K_T_CRAZY_MIN] -= 273.15;
+            constants[K_T_CRAZY_MAX] -= 273.15;
+        }
+        let mut k_device = DeviceValues::new(s, K_COUNT, real_kind)?;
+        k_device.upload(s, &constants, false)?;
         let mo_passes = s.alloc_zeros::<i32>(b)?;
+        let tolerance_flags = s.alloc_zeros::<u32>(b)?;
+        let count_change_cause = s.alloc_zeros::<u32>(b)?;
 
         // The pointer table, in the order of the kernel's `struct Arrays`.
         let mut ptrs: Vec<u64> = Vec::new();
         {
             let mut push64 = |p: u64| ptrs.push(p);
             for e in &elem {
-                push64(e.device_ptr(s).0);
+                push64(e.ptr(s));
             }
             push64(marker.device_ptr(s).0);
-            push64(t.device_ptr(s).0);
+            push64(t.ptr(s));
             for x in &scratch {
-                push64(x.device_ptr(s).0);
+                push64(x.ptr(s));
             }
             for x in &ints {
                 push64(x.device_ptr(s).0);
@@ -474,14 +590,16 @@ impl Batch {
             for x in &longs {
                 push64(x.device_ptr(s).0);
             }
-            push64(buffer.device_ptr(s).0);
-            push64(acc.device_ptr(s).0);
-            push64(last.device_ptr(s).0);
-            push64(par.device_ptr(s).0);
+            push64(buffer.ptr(s));
+            push64(acc.ptr(s));
+            push64(last.ptr(s));
+            push64(par_device.ptr(s));
             push64(ft.device_ptr(s).0);
-            push64(fv.device_ptr(s).0);
-            push64(daily.device_ptr(s).0);
+            push64(fv.ptr(s));
+            push64(daily_values.ptr(s));
             push64(mo_passes.device_ptr(s).0);
+            push64(tolerance_flags.device_ptr(s).0);
+            push64(count_change_cause.device_ptr(s).0);
         }
         let arrays = s.clone_htod(&ptrs)?;
         Ok(Self {
@@ -497,34 +615,40 @@ impl Batch {
             buffer,
             acc,
             last,
-            par,
+            par: par_device,
             ft,
             fv,
-            daily,
+            daily_values,
             days,
             mo_passes,
+            tolerance_flags,
+            count_change_cause,
             arrays,
-            k,
+            k: k_device,
         })
     }
 
     /// Device bytes held by this batch.
     pub fn device_bytes(&self) -> usize {
-        let (b, ne, nn) = (self.b, self.nmax * self.b, (self.nmax + 1) * self.b);
-        11 * ne * 8 + ne * 4 + nn * 8 + 8 * nn * 8 + 7 * b * 4 + 3 * b * 8
-            + b * 8 * (1 + A_COUNT + L_COUNT + P_COUNT)
-            + self.rows.max(1) * b * 8 * (1 + F_COUNT)
-            + self.days.max(1) * D_COUNT * b * 8
+        self.elem.iter().map(DeviceValues::byte_len).sum::<usize>() + self.marker.len() * 4
+            + self.t.byte_len() + self._scratch.iter().map(DeviceValues::byte_len).sum::<usize>()
+            + self.ints.iter().map(|v| v.len() * 4).sum::<usize>()
+            + self.longs.iter().map(|v| v.len() * 8).sum::<usize>()
+            + self.buffer.byte_len() + self.acc.byte_len() + self.last.byte_len() + self.par.byte_len()
+            + self.ft.len() * 8 + self.fv.byte_len() + self.daily_values.byte_len() + self.k.byte_len()
+            + self.mo_passes.len() * 4 + self.arrays.len() * 8
+            + self.tolerance_flags.len() * 4
+            + self.count_change_cause.len() * 4
     }
 
     /// Upload the whole host state.
     pub fn upload(&mut self, gpu: &Gpu, h: &HostState) -> Result<()> {
         let s = &gpu.stream;
         for (d, x) in self.elem.iter_mut().zip(&h.elem) {
-            s.memcpy_htod(x, d)?;
+            d.upload(s, x, false)?;
         }
         s.memcpy_htod(&h.marker, &mut self.marker)?;
-        s.memcpy_htod(&h.t, &mut self.t)?;
+        self.t.upload(s, &h.t, gpu.build.precision.is_f32())?;
         for (d, x) in self.ints.iter_mut().zip([
             &h.n,
             &h.fail,
@@ -539,9 +663,20 @@ impl Batch {
         for (d, x) in self.longs.iter_mut().zip([&h.prev_t, &h.steps, &h.fail_t]) {
             s.memcpy_htod(x, d)?;
         }
-        s.memcpy_htod(&h.buffer, &mut self.buffer)?;
-        s.memcpy_htod(&h.acc, &mut self.acc)?;
-        s.memcpy_htod(&h.last, &mut self.last)?;
+        self.buffer.upload(s, &h.buffer, false)?;
+        self.acc.upload(s, &h.acc, false)?;
+        if gpu.build.precision.is_f32() {
+            let mut last = h.last.clone();
+            for c in 0..self.b {
+                for field in [0, L_TSG] {
+                    let i = field * self.b + c;
+                    last[i] -= 273.15;
+                }
+            }
+            self.last.upload(s, &last, false)?;
+        } else {
+            self.last.upload(s, &h.last, false)?;
+        }
         Ok(())
     }
 
@@ -554,13 +689,13 @@ impl Batch {
         let nn = (upto.min(self.nmax) + 1) * b;
         for (d, x) in self.elem.iter().zip(h.elem.iter_mut()) {
             if ne > 0 {
-                s.memcpy_dtoh(&d.slice(0..ne), &mut x[..ne])?;
+                d.download(s, &mut x[..ne], false)?;
             }
         }
         if ne > 0 {
             s.memcpy_dtoh(&self.marker.slice(0..ne), &mut h.marker[..ne])?;
         }
-        s.memcpy_dtoh(&self.t.slice(0..nn), &mut h.t[..nn])?;
+        self.t.download(s, &mut h.t[..nn], gpu.build.precision.is_f32())?;
         for (d, x) in self.ints.iter().zip([
             &mut h.n,
             &mut h.fail,
@@ -579,10 +714,18 @@ impl Batch {
         {
             s.memcpy_dtoh(d, x)?;
         }
-        s.memcpy_dtoh(&self.buffer, &mut h.buffer)?;
-        s.memcpy_dtoh(&self.acc, &mut h.acc)?;
-        s.memcpy_dtoh(&self.last, &mut h.last)?;
+        self.buffer.download(s, &mut h.buffer, false)?;
+        self.acc.download(s, &mut h.acc, false)?;
+        self.last.download(s, &mut h.last, false)?;
+        if gpu.build.precision.is_f32() {
+            for c in 0..b {
+                h.last[c] += 273.15;
+                h.last[L_TSG * b + c] += 273.15;
+            }
+        }
         s.memcpy_dtoh(&self.mo_passes, &mut h.mo_passes)?;
+        s.memcpy_dtoh(&self.tolerance_flags, &mut h.tolerance_flags)?;
+        s.memcpy_dtoh(&self.count_change_cause, &mut h.count_change_cause)?;
         s.synchronize()?;
         Ok(())
     }
@@ -606,7 +749,22 @@ impl Batch {
     pub fn upload_forcing(&mut self, gpu: &Gpu, ft: &[i64], fv: &[f64]) -> Result<()> {
         let s = &gpu.stream;
         s.memcpy_htod(ft, &mut self.ft.slice_mut(0..ft.len()))?;
-        s.memcpy_htod(fv, &mut self.fv.slice_mut(0..fv.len()))?;
+        let mut values = fv.to_vec();
+        if gpu.build.precision.is_f32() {
+            let b = self.b;
+            let rows = fv.len() / (F_COUNT * b);
+            for r in 0..rows {
+                for f in [0, 7] {
+                    for c in 0..b {
+                        let i = (r * F_COUNT + f) * b + c;
+                        if values[i].is_finite() {
+                            values[i] -= 273.15;
+                        }
+                    }
+                }
+            }
+        }
+        self.fv.upload(s, &values, false)?;
         Ok(())
     }
 
@@ -636,7 +794,7 @@ impl Batch {
         };
         let mut l = gpu.stream.launch_builder(&gpu.advance);
         l.arg(&self.arrays)
-            .arg(&self.k)
+            .arg(&self.k.raw)
             .arg(&b)
             .arg(&nmax)
             .arg(&rows)
@@ -654,10 +812,9 @@ impl Batch {
 
     /// Download the daily slots.
     pub fn daily(&self, gpu: &Gpu) -> Result<Vec<f64>> {
-        Ok(gpu.stream.clone_dtoh(&self.daily)?)
+        let mut values = vec![0.0; self.daily_values.len];
+        self.daily_values.download(&gpu.stream, &mut values, false)?;
+        Ok(values)
     }
 
-    pub fn par(&self) -> &CudaSlice<f64> {
-        &self.par
-    }
 }

@@ -222,6 +222,10 @@ pub fn energy_relative_to_melt(column: &Column) -> f64 {
 /// Water may exceed the holding capacity afterwards; [`cascade`] runs next and
 /// moves the excess down.
 pub fn phase_change(column: &mut Column) -> PhaseChange {
+    phase_change_with_melted_out_ice(column, MELTED_OUT_ICE)
+}
+
+pub fn phase_change_with_melted_out_ice(column: &mut Column, threshold: f64) -> PhaseChange {
     let mut report = PhaseChange::default();
     if column.elements.is_empty() {
         return report;
@@ -279,7 +283,7 @@ pub fn phase_change(column: &mut Column) -> PhaseChange {
         }
     }
 
-    report.drained = remove_melted_out(column, &mut energies);
+    report.drained = remove_melted_out(column, &mut energies, threshold);
     set_temperatures_from_energies(column, &energies);
     report
 }
@@ -288,12 +292,12 @@ pub fn phase_change(column: &mut Column) -> PhaseChange {
 /// water into the element below and their top node's energy into the node
 /// below it. Returns liquid that left the column because the bottom element
 /// itself melted out.
-fn remove_melted_out(column: &mut Column, energies: &mut Vec<f64>) -> f64 {
+fn remove_melted_out(column: &mut Column, energies: &mut Vec<f64>, threshold: f64) -> f64 {
     let mut drained = 0.0;
     let mut index = column.elements.len();
     while index > 0 {
         index -= 1;
-        if column.elements[index].ice_mass() >= MELTED_OUT_ICE {
+        if column.elements[index].ice_mass() >= threshold {
             continue;
         }
         let gone = column.elements.remove(index);

@@ -34,6 +34,7 @@ use pi_snow_physics::water;
 
 /// Marker bits kept in `Microstructure::marker` (as `engine.rs`).
 pub const MARK_REFROZEN: u16 = 1;
+const MELTED_OUT_ICE_DEFAULT: f64 = 1e-6;
 pub const MARK_SURFACE_HOAR: u16 = 2;
 /// Floor on measurement heights above the snow, m (as `engine.rs`).
 pub const MIN_MEASUREMENT_HEIGHT: f64 = 0.5;
@@ -292,6 +293,8 @@ pub struct Stepper<'a> {
     /// Monin-Obukhov passes of the last step's final surface budget, recounted by
     /// `mo::fluxes_counted` (the physics crate does not report it).
     pub mo_passes: u32,
+    melted_out_ice: f64,
+    refrozen_mass_fraction: Option<f64>,
 }
 
 impl<'a> Stepper<'a> {
@@ -320,7 +323,21 @@ impl<'a> Stepper<'a> {
             steps: 0,
             last: LastForcing::default(),
             mo_passes: 0,
+            melted_out_ice: MELTED_OUT_ICE_DEFAULT,
+            refrozen_mass_fraction: None,
         })
+    }
+
+    pub fn new_marker_control(
+        cfg: &'a RunConfig,
+        options: &PhysicsOptions,
+        site: &'a Site,
+        start: Column,
+    ) -> Result<Self, RunError> {
+        let mut stepper = Self::new(cfg, options, site, start)?;
+        stepper.melted_out_ice = 1e-4;
+        stepper.refrozen_mass_fraction = Some(1e-3);
+        Ok(stepper)
     }
 
     /// `engine.rs`'s loop body for one row. The caller stops at `end`.
@@ -455,12 +472,14 @@ impl<'a> Stepper<'a> {
             let qg0 = (thermal::internal_energy(column) - before) / dt - b.total - sources;
 
             // 5. Phase change and water.
-            let water_before: Vec<f64> = column.elements.iter().map(Element::water_mass).collect();
+            let water_before: Vec<(f64, f64)> = column.elements.iter()
+                .map(|e| (e.water_mass(), e.mass())).collect();
             let n_before = column.elements.len();
-            let pc = water::phase_change(column);
+            let pc = water::phase_change_with_melted_out_ice(column, self.melted_out_ice);
             if column.elements.len() == n_before {
-                for (e, w) in column.elements.iter_mut().zip(water_before) {
-                    if e.water_mass() < w - 1e-9 {
+                for (e, (w, mass)) in column.elements.iter_mut().zip(water_before) {
+                    let threshold = self.refrozen_mass_fraction.map_or(1e-9, |fraction| fraction * mass);
+                    if e.water_mass() < w - threshold {
                         e.micro.marker |= MARK_REFROZEN;
                     }
                 }
@@ -873,6 +892,10 @@ fn layers(c: &Column, options: &PhysicsOptions) -> Vec<Layer> {
             }
         })
         .collect()
+}
+
+pub fn grain_hardness_values(c: &Column, options: &PhysicsOptions) -> Vec<(u16, f64)> {
+    layers(c, options).into_iter().map(|layer| (layer.grain_type, layer.hand_hardness)).collect()
 }
 
 fn hardness(code: u16, density: f64) -> f64 {

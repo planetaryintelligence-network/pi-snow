@@ -65,13 +65,15 @@ pub enum RunError {
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
-    /// A NaN or infinity in the state or the surface budget while the column
-    /// holds snow (engine-finite-guard-v1); `step` counts forcing steps from 1.
+    /// A NaN or infinity in the state or checked surface budget while the
+    /// column holds snow. `partial` contains output through the last completed
+    /// output interval; `step` counts forcing steps from 1.
     #[error("non-finite state at time step {step} ({time}): {field}")]
     NonFinite {
         step: usize,
         time: DateTime<Utc>,
         field: String,
+        partial: Box<RunOutput>,
     },
 }
 
@@ -89,6 +91,7 @@ pub struct Site {
 }
 
 /// Everything a run writes.
+#[derive(Debug)]
 pub struct RunOutput {
     pub smet: String,
     pub pro: String,
@@ -193,6 +196,22 @@ pub fn run_with_options(
     let mut steps = 0usize;
     let mut ledger = (options.mass_report == MassReport::Ledger).then(Ledger::new);
     let mut interval = Interval::default();
+    let make_output =
+        |rows: Vec<OutputRow>, pro_text: String, steps: usize, ledger: Option<Ledger>| RunOutput {
+            smet: pi_snow_io::smet::write_output_smet(
+                &site.station_id,
+                &site.station_name,
+                site.latitude,
+                site.longitude,
+                site.altitude,
+                site.slope_angle,
+                site.slope_azimuth,
+                &rows,
+            ),
+            pro: pro_text,
+            steps,
+            mass: ledger.map(Ledger::into_text),
+        };
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -426,14 +445,16 @@ pub fn run_with_options(
             }
         }
         // The comparisons above let a NaN through. While the column holds snow,
-        // a non-finite state carries into every later step, so stop and name
-        // it. An empty column is not checked: when the last element vanishes,
-        // Phase 2 leaves one NaN node that the next bare-ground step resets
-        // (engine-finite-guard-v1), and stopping there would change healthy runs.
+        // stop on a non-finite state or checked budget term. Qg0 is excluded:
+        // it reads pre-solve energy and can be NaN for one step while the ground
+        // boundary resets the node and the state remains finite. Empty columns
+        // remain exempt to preserve Phase 2's vanishing-pack output.
+        // Validated configurations have zero soil elements; if soil elements
+        // are introduced, revisit this empty-column scope.
         if let Some(field) = (!column.elements.is_empty())
             .then(|| {
                 crate::finite::column(&column)
-                    .or_else(|| crate::finite::budget(&budget, qg0, deposition.buffered()))
+                    .or_else(|| crate::finite::budget(&budget, deposition.buffered()))
             })
             .flatten()
         {
@@ -441,6 +462,7 @@ pub fn run_with_options(
                 step: steps,
                 time: t,
                 field,
+                partial: Box::new(make_output(rows, pro_text, steps, ledger)),
             });
         }
 
@@ -474,22 +496,7 @@ pub fn run_with_options(
             interval = Interval::default();
         }
     }
-    let smet = pi_snow_io::smet::write_output_smet(
-        &site.station_id,
-        &site.station_name,
-        site.latitude,
-        site.longitude,
-        site.altitude,
-        site.slope_angle,
-        site.slope_azimuth,
-        &rows,
-    );
-    Ok(RunOutput {
-        smet,
-        pro: pro_text,
-        steps,
-        mass: ledger.map(Ledger::into_text),
-    })
+    Ok(make_output(rows, pro_text, steps, ledger))
 }
 
 fn history(e: &Element) -> History {

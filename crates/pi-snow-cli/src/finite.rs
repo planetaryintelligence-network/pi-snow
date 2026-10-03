@@ -4,8 +4,8 @@
 //! passes, so a non-finite state could run to the end of a season and write
 //! NaN to the output with exit status 0. These checks read the state after
 //! each step, while the column holds snow, and name the first non-finite
-//! quantity found. They change nothing: a run whose snow state stays finite
-//! writes exactly the bytes it wrote before.
+//! quantity found in scan order. They change nothing: a run whose snow state
+//! stays finite writes exactly the bytes it wrote before.
 //!
 //! Not checked, by decision (engine-finite-guard-v1, option D): an empty
 //! column, and the SMET rows. Phase 2 leaves one NaN node for a step when the
@@ -21,8 +21,7 @@ fn bad(value: f64) -> bool {
     !value.is_finite()
 }
 
-/// The first non-finite quantity of the column, described for the message,
-/// with the column's size so a reader can tell a vanishing pack from a deep one.
+/// The first non-finite quantity in scan order, with the column's size.
 pub fn column(c: &Column) -> Option<String> {
     column_field(c).map(|f| {
         let hs: f64 = c.elements.iter().map(|e| e.thickness).sum();
@@ -67,8 +66,9 @@ fn column_field(c: &Column) -> Option<String> {
     None
 }
 
-/// The first non-finite term of the surface budget or the ground flux.
-pub fn budget(b: &Budget, qg0: f64, buffered: f64) -> Option<String> {
+/// The first non-finite surface-budget term or deposition buffer.
+/// Qg0 is omitted because it is computed from the previous step's state.
+pub fn budget(b: &Budget, buffered: f64) -> Option<String> {
     [
         ("Qs", b.sensible),
         ("Ql", b.latent),
@@ -77,7 +77,6 @@ pub fn budget(b: &Budget, qg0: f64, buffered: f64) -> Option<String> {
         ("LWR_net", b.lwr_net),
         ("vapour_mass", b.vapour_mass),
         ("surface flux total", b.total),
-        ("Qg0", qg0),
         ("deposition buffer", buffered),
     ]
     .iter()

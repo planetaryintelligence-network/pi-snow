@@ -122,6 +122,10 @@ fn a_nan_under_snow_exits_non_zero_naming_the_step_and_the_field() {
     assert!(err.contains("non-finite state at time step 400"), "{err}");
     assert!(err.contains("2026-01-03 18:40:00"), "{err}");
     assert!(err.contains("NaN"), "{err}");
+    let smet = std::fs::read_to_string(unit.join("output/ULAMB1_hrrr-terrain-v1.smet")).unwrap();
+    let last = smet.lines().last().unwrap();
+    assert!(last.starts_with("2026-01-03T18:00"), "{last}");
+    assert!(unit.join("output/ULAMB1_hrrr-terrain-v1.pro").is_file());
 }
 
 #[test]
@@ -234,9 +238,12 @@ fn the_checkers_name_fields_a_temperature_check_would_miss() {
         )
     );
     let b = Budget::default();
-    assert_eq!(finite::budget(&b, 0.0, 0.0), None);
+    assert_eq!(finite::budget(&b, 0.0), None);
+    let mut bad = b;
+    bad.latent = f64::INFINITY;
+    assert_eq!(finite::budget(&bad, 0.0).as_deref(), Some("Ql = inf"));
     assert_eq!(
-        finite::budget(&b, f64::INFINITY, 0.0).as_deref(),
-        Some("Qg0 = inf")
+        finite::budget(&b, f64::NAN).as_deref(),
+        Some("deposition buffer = NaN")
     );
 }

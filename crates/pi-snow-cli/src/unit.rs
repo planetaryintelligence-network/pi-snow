@@ -15,7 +15,7 @@ use pi_snow_io::ini::{Ini, RunConfig};
 use pi_snow_io::smet::Smet;
 use pi_snow_io::sno::SnoFile;
 
-use crate::engine::{self, Site};
+use crate::engine::{self, RunError, RunOutput, Site};
 
 /// What one finished column reports.
 pub struct UnitRun {
@@ -47,7 +47,9 @@ pub fn parse_physics(args: &[String]) -> Result<PhysicsOptions> {
 
 pub fn run_unit(ini_path: &Path, end: DateTime<Utc>, physics: &PhysicsOptions) -> Result<UnitRun> {
     let root = ini_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let cfg = RunConfig::from_ini(&Ini::parse(&std::fs::read_to_string(ini_path).with_context(|| ini_path.display().to_string())?)?)?;
+    let cfg = RunConfig::from_ini(&Ini::parse(
+        &std::fs::read_to_string(ini_path).with_context(|| ini_path.display().to_string())?,
+    )?)?;
     let meteo = root.join(&cfg.meteo_path);
     let forcing_path = meteo.join(format!("{}.smet", cfg.station_id));
     let forcing = Smet::parse(
@@ -78,22 +80,35 @@ pub fn run_unit(ini_path: &Path, end: DateTime<Utc>, physics: &PhysicsOptions) -
     };
 
     let started = std::time::Instant::now();
-    let out = engine::run_with_options(&cfg, physics, &site, &forcing, sno.to_column(), end)?;
-    let output: PathBuf = root.join(&cfg.output_path);
-    std::fs::create_dir_all(&output)?;
-    let stem = output.join(format!("{}_{}", cfg.station_id, cfg.experiment));
-    std::fs::write(stem.with_extension("smet"), out.smet)?;
-    std::fs::write(stem.with_extension("pro"), out.pro)?;
-    // The ledger (MASS_REPORT=LEDGER) is written here, not in main, so batch
-    // mode carries it too.
-    if let Some(mass) = out.mass {
-        std::fs::write(stem.with_extension("mass.csv"), mass)?;
-    }
+    let out = match engine::run_with_options(&cfg, physics, &site, &forcing, sno.to_column(), end) {
+        Ok(out) => out,
+        Err(error) => {
+            if let RunError::NonFinite { partial, .. } = &error {
+                write_output(&root, &cfg, partial)?;
+            }
+            return Err(error.into());
+        }
+    };
+    write_output(&root, &cfg, &out)?;
     Ok(UnitRun {
         station_id: cfg.station_id,
         steps: out.steps,
         seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
+    let output: PathBuf = root.join(&cfg.output_path);
+    std::fs::create_dir_all(&output)?;
+    let stem = output.join(format!("{}_{}", cfg.station_id, cfg.experiment));
+    std::fs::write(stem.with_extension("smet"), &out.smet)?;
+    std::fs::write(stem.with_extension("pro"), &out.pro)?;
+    // The ledger (MASS_REPORT=LEDGER) is written here, not in main, so batch
+    // mode carries it too.
+    if let Some(mass) = &out.mass {
+        std::fs::write(stem.with_extension("mass.csv"), mass)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -106,7 +121,13 @@ mod tests {
 
     #[test]
     fn a_well_formed_physics_flag_parses() {
-        let o = parse_physics(&args(&["-c", "x.ini", "--physics", "S5=LWC_INDEX_MITTERER2013"])).unwrap();
+        let o = parse_physics(&args(&[
+            "-c",
+            "x.ini",
+            "--physics",
+            "S5=LWC_INDEX_MITTERER2013",
+        ]))
+        .unwrap();
         assert_ne!(o, pi_snow_core::PhysicsOptions::default());
     }
 

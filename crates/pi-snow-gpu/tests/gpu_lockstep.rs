@@ -1,4 +1,4 @@
-//! Kernel against the CPU stepper on synthetic forcing, one day of lockstep. Skipped
+//! Kernel against the CPU stepper on synthetic forcing, three days of lockstep. Skipped
 //! (passes trivially, with a message) on a machine without a usable CUDA device.
 
 use pi_snow_gpu::gpu::{Gpu, Precision};
@@ -7,7 +7,7 @@ use pi_snow_gpu::runner::ColumnInput;
 use pi_snow_gpu::synth;
 
 #[test]
-fn one_synthetic_day_agrees_and_counts_monin_obukhov_passes() {
+fn three_synthetic_days_agree_and_count_monin_obukhov_passes() {
     let Ok(gpu) = Gpu::new(Precision::F64) else {
         eprintln!("no CUDA device: skipped");
         return;

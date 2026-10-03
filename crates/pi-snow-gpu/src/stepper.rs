@@ -325,6 +325,7 @@ impl<'a> Stepper<'a> {
 
     /// `engine.rs`'s loop body for one row. The caller stops at `end`.
     pub fn step(&mut self, row: &ForcingRow) -> Result<Outcome, RunError> {
+        self.mo_passes = 0;
         let cfg = self.cfg;
         let options = &self.options;
         let site = self.site;
@@ -582,6 +583,37 @@ impl<'a> Stepper<'a> {
         );
         self.acc = Accum::default();
         row
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skipped_forcing_clears_the_previous_mo_pass_count() {
+        let synthetic = crate::synth::generate(1, 1);
+        let site = &synthetic.sites[0];
+        let cfg = crate::synth::config();
+        let mut stepper = Stepper::new(
+            &cfg,
+            &PhysicsOptions::default(),
+            site,
+            crate::synth::bare(site),
+        )
+        .unwrap();
+        let rows = &synthetic.rows[0];
+        assert!(matches!(stepper.step(&rows[0]).unwrap(), Outcome::NoStep));
+        assert!(matches!(
+            stepper.step(&rows[1]).unwrap(),
+            Outcome::Advanced { .. }
+        ));
+        assert!(stepper.mo_passes > 0);
+
+        let mut missing = rows[2];
+        missing.ta = None;
+        assert!(matches!(stepper.step(&missing).unwrap(), Outcome::Skipped));
+        assert_eq!(stepper.mo_passes, 0);
     }
 }
 

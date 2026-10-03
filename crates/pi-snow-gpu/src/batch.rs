@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use pi_snow_core::PhysicsOptions;
-use pi_snow_io::ini::{NewSnowDensity, Stability};
+use pi_snow_io::ini::{Ini, NewSnowDensity, RunConfig, Stability};
 
 use crate::gpu::{self, Gpu, Precision};
 use crate::runner::{self, ColumnInput};
@@ -121,13 +121,24 @@ pub fn parse_args_with(args: &[String], extra: &[&str]) -> Result<(Args, Vec<(St
 
 /// Refusals beyond `pi-snow`'s own (plan.md section 8).
 pub fn check_unit(u: &Unit) -> Result<()> {
-    if u.cfg.stability != Stability::MoHoltslag {
+    check_config(&u.cfg)
+}
+
+fn check_config(cfg: &RunConfig) -> Result<()> {
+    if cfg.stability != Stability::MoHoltslag {
         bail!("ATMOSPHERIC_STABILITY other than MO_HOLTSLAG is not verified on the GPU");
     }
-    if u.cfg.new_snow_density != NewSnowDensity::LehningNew {
+    if cfg.new_snow_density != NewSnowDensity::LehningNew {
         bail!("new-snow density other than LEHNING_NEW is not verified on the GPU");
     }
     Ok(())
+}
+
+fn validate_ini(job: &Job) -> Result<()> {
+    let path = job.unit_dir.join("snowpack.ini");
+    let source = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
+    let cfg = RunConfig::from_ini(&Ini::parse(&source)?)?;
+    check_config(&cfg)
 }
 
 pub struct UnitReport {
@@ -305,6 +316,11 @@ fn write_outputs(u: &Unit, smet: &str, pro: &str) -> Result<()> {
 /// Entry point; `args` excludes the program and `batch`.
 pub fn main(args: &[String]) -> Result<()> {
     let parsed = parse_args(args)?;
+    // Refuse unsupported configuration before CUDA initialization, so an invalid INI
+    // produces the same actionable error on hosts without a usable GPU.
+    for job in &parsed.jobs {
+        validate_ini(job)?;
+    }
     let gpu = Gpu::new(parsed.precision)?;
     let started = std::time::Instant::now();
     let reports = run(
@@ -405,6 +421,8 @@ mod tests {
         };
         for (ini, key) in cases {
             std::fs::write(dir.join("snowpack.ini"), ini).unwrap();
+            let validation = validate_ini(&job).unwrap_err();
+            assert!(validation.to_string().contains(key), "{key}: {validation:#}");
             let error = match load(&job) {
                 Ok(_) => panic!("batch accepted an unverified INI value for {key}"),
                 Err(error) => error,

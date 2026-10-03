@@ -41,7 +41,22 @@ pub fn config_variant() -> RunConfig {
         + "[SnowpackAdvanced]\nTHRESH_RAIN = 0.4\n";
     let cfg = RunConfig::from_ini(&Ini::parse(&text).unwrap()).unwrap();
     assert_eq!(cfg.thresh_rain_c, 0.4);
+    assert_eq!(cfg.height_of_wind_value, 6.5);
+    assert_eq!(cfg.height_of_meteo_values, 3.0);
+    assert_eq!(cfg.roughness_length, 0.003);
     cfg
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn variant_ini_uses_all_non_default_referee_values() {
+        let cfg = super::config_variant();
+        assert_eq!(cfg.thresh_rain_c, 0.4);
+        assert_eq!(cfg.height_of_wind_value, 6.5);
+        assert_eq!(cfg.height_of_meteo_values, 3.0);
+        assert_eq!(cfg.roughness_length, 0.003);
+    }
 }
 
 pub struct Synthetic {

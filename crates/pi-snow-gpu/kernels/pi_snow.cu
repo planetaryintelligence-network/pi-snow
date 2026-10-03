@@ -862,6 +862,7 @@ __device__ int step_row(const Ctx &x, int &n, long long t, const double *fv, int
 #define FV(f) fv[((size_t)r * F_COUNT + (f)) * B + c]
 #define PAR(p) a->par[(size_t)(p) * B + c]
 #define ACC(q) a->acc[(size_t)(q) * B + c]
+    a->mo_passes[c] = 0;
     bool had = a->has_prev[c] != 0;
     long long t_prev = a->prev_t[c];
     a->prev_t[c] = t;

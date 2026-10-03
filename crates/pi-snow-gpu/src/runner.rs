@@ -6,6 +6,8 @@ use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use pi_snow_core::{Column, PhysicsOptions};
 use pi_snow_io::ini::RunConfig;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::gpu::{self, Batch, F_COUNT, Gpu, HostState, ROW_ABSENT};
 use crate::stepper::{self, Constants, ForcingRow, SeasonOutput, SeasonWriter, Site};
@@ -32,6 +34,18 @@ pub struct ColumnResult {
     /// At every 12:00 UTC output: time and HS, SWE, TSS, liquid water, element count,
     /// summed as the kernel's grid mode sums them (the G2 determinism check).
     pub daily: Vec<(i64, [f64; 5])>,
+}
+
+pub struct ColumnSummary {
+    pub steps: i64,
+    pub max_elements: i32,
+    pub failure: Option<String>,
+    pub daily: Vec<(i64, [f64; 5])>,
+}
+
+pub struct OutputTargets {
+    pub smet: PathBuf,
+    pub pro: PathBuf,
 }
 
 /// The grid mode's daily fields from a rebuilt column (same summation order).
@@ -98,6 +112,37 @@ pub fn run_hourly(
     nmax: usize,
     options: &PhysicsOptions,
 ) -> Result<Vec<ColumnResult>> {
+    run_hourly_inner(gpu, inputs, nmax, options, None)
+}
+
+pub fn run_hourly_streaming(
+    gpu: &Gpu,
+    inputs: &[ColumnInput],
+    nmax: usize,
+    options: &PhysicsOptions,
+    targets: &[OutputTargets],
+) -> Result<Vec<ColumnSummary>> {
+    if targets.len() != inputs.len() {
+        bail!("one output target is required per input column");
+    }
+    Ok(run_hourly_inner(gpu, inputs, nmax, options, Some(targets))?
+        .into_iter()
+        .map(|r| ColumnSummary {
+            steps: r.steps,
+            max_elements: r.max_elements,
+            failure: r.failure,
+            daily: r.daily,
+        })
+        .collect())
+}
+
+fn run_hourly_inner(
+    gpu: &Gpu,
+    inputs: &[ColumnInput],
+    nmax: usize,
+    options: &PhysicsOptions,
+    output_targets: Option<&[OutputTargets]>,
+) -> Result<Vec<ColumnResult>> {
     if *options != PhysicsOptions::default() {
         bail!("the GPU engine runs the default physics only");
     }
@@ -134,6 +179,35 @@ pub fn run_hourly(
     batch.upload_forcing(gpu, &ft, &fv)?;
 
     let mut writers: Vec<SeasonWriter> = inputs.iter().map(|i| SeasonWriter::new(i.site)).collect();
+    let mut pro_files = output_targets
+        .map(|targets| {
+            targets
+                .iter()
+                .zip(inputs)
+                .map(|(target, input)| {
+                    let partial = partial_path(&target.pro);
+                    if let Some(parent) = partial.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&partial)?;
+                    let site = input.site;
+                    let header = pi_snow_io::pro::write_header(&pi_snow_io::pro::ProHeader {
+                        station_name: site.station_name.clone(),
+                        latitude: site.latitude,
+                        longitude: site.longitude,
+                        altitude: site.altitude,
+                        slope_angle_deg: site.slope_angle,
+                        slope_azimuth_deg: site.slope_azimuth,
+                    });
+                    file.write_all(header.as_bytes())?;
+                    Ok(Some((partial, file)))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?;
     let mut daily: Vec<Vec<(i64, [f64; 5])>> = vec![Vec::new(); b];
     let mut upto = inputs.iter().map(|i| i.start.elements.len()).max().unwrap_or(0);
     loop {
@@ -168,7 +242,19 @@ pub fn run_hourly(
                 }
                 let with_profile =
                     inputs[c].profile_times.as_ref().is_none_or(|k| k.contains(&t.timestamp()));
-                writers[c].push_parts(row, t, &column, options, with_profile);
+                if let Some(files) = &mut pro_files {
+                    if with_profile {
+                        let profile = stepper::profile(t, &column, options);
+                        files[c]
+                            .as_mut()
+                            .unwrap()
+                            .1
+                            .write_all(pi_snow_io::pro::write_timestep(&profile).as_bytes())?;
+                    }
+                    writers[c].push_parts(row, t, &column, options, false);
+                } else {
+                    writers[c].push_parts(row, t, &column, options, with_profile);
+                }
             }
         }
         if finished {
@@ -190,8 +276,40 @@ pub fn run_hourly(
             )),
             other => Some(format!("failure code {other}")),
         };
+        let output = w.finish(i.site, host.steps[c] as usize);
+        if let Some(targets) = output_targets {
+            let (pro_partial, mut pro_file) = pro_files.as_mut().unwrap()[c].take().unwrap();
+            if failure.is_some() {
+                drop(pro_file);
+                std::fs::remove_file(pro_partial)?;
+            } else {
+                pro_file.flush()?;
+                drop(pro_file);
+                let smet_partial = partial_path(&targets[c].smet);
+                if let Some(parent) = smet_partial.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut smet_file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&smet_partial)?;
+                smet_file.write_all(output.smet.as_bytes())?;
+                smet_file.flush()?;
+                drop(smet_file);
+                std::fs::rename(smet_partial, &targets[c].smet)?;
+                std::fs::rename(pro_partial, &targets[c].pro)?;
+            }
+        }
         out.push(ColumnResult {
-            output: w.finish(i.site, host.steps[c] as usize),
+            output: if output_targets.is_some() {
+                SeasonOutput {
+                    smet: String::new(),
+                    pro: String::new(),
+                    steps: output.steps,
+                }
+            } else {
+                output
+            },
             steps: host.steps[c],
             max_elements: host.maxn[c],
             failure,
@@ -199,4 +317,13 @@ pub fn run_hourly(
         });
     }
     Ok(out)
+}
+
+fn partial_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("output"))
+        .to_os_string();
+    name.push(format!(".partial.{}", std::process::id()));
+    path.with_file_name(name)
 }

@@ -23,7 +23,7 @@ use pi_snow_core::PhysicsOptions;
 use pi_snow_io::ini::{Ini, NewSnowDensity, RunConfig, Stability};
 
 use crate::gpu::{self, Gpu, Precision};
-use crate::runner::{self, ColumnInput};
+use crate::runner::{self, ColumnInput, OutputTargets};
 use crate::stepper::{Constants, ForcingIndex};
 use crate::unit::{self, Unit, parse_end};
 
@@ -273,7 +273,18 @@ pub fn run(
                 }
             })
             .collect();
-        let results = match runner::run_hourly(gpu, &inputs, nmax, &options) {
+        let targets: Vec<OutputTargets> = members
+            .iter()
+            .map(|&p| {
+                let (_, u, _) = &loaded[p];
+                let stem = unit::output_stem(u);
+                OutputTargets {
+                    smet: stem.with_extension("smet"),
+                    pro: stem.with_extension("pro"),
+                }
+            })
+            .collect();
+        let results = match runner::run_hourly_streaming(gpu, &inputs, nmax, &options, &targets) {
             Ok(r) => r,
             Err(e) => {
                 for &p in &members {
@@ -291,9 +302,6 @@ pub fn run(
                 rep.error = Some(f);
                 continue;
             }
-            if let Err(e) = write_outputs(u, &r.output.smet, &r.output.pro) {
-                rep.error = Some(format!("{e:#}"));
-            }
             if let Some(dir) = daily_out {
                 let mut text = String::from("t\tHS\tSWE\tTSS\twater\tn\n");
                 for (t, f) in &r.daily {
@@ -305,14 +313,6 @@ pub fn run(
         }
     }
     Ok(reports)
-}
-
-fn write_outputs(u: &Unit, smet: &str, pro: &str) -> Result<()> {
-    let stem = unit::output_stem(u);
-    std::fs::create_dir_all(stem.parent().unwrap_or(Path::new(".")))?;
-    std::fs::write(stem.with_extension("smet"), smet)?;
-    std::fs::write(stem.with_extension("pro"), pro)?;
-    Ok(())
 }
 
 /// Entry point; `args` excludes the program and `batch`.

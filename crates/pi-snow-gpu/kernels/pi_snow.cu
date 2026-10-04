@@ -111,6 +111,7 @@ using AccumReal = Real;
 // Failure codes.
 #define FAIL_CRAZY 1
 #define FAIL_OVERFLOW 2
+#define FAIL_NONFINITE 3
 
 // Indices into the run-constant array `k` (host: gpu.rs, RunConst).
 enum {
@@ -1090,6 +1091,31 @@ __device__ int step_row(const Ctx &x, int &n, long long t, const Real *fv, int r
         Real tn = EL(T, j);
         if (tn < k[K_T_CRAZY_MIN] || tn > k[K_T_CRAZY_MAX]) {
             a->fail[c] = FAIL_CRAZY;
+            a->fail_t[c] = t;
+            return 4;
+        }
+    }
+    // Match finite.rs: scan state after physics and before accumulation/output,
+    // while snow is present. Empty columns keep their registered NaN convention.
+    if (n > 0) {
+        bool nonfinite = false;
+        for (int j = 0; j < nodes && !nonfinite; ++j)
+            nonfinite = !isfinite(EL(T, j));
+        for (int i = 0; i < n && !nonfinite; ++i) {
+            size_t p = (size_t)i * B + c;
+            nonfinite = !isfinite(a->thick[p]) || !isfinite(a->ice[p]) ||
+                        !isfinite(a->water[p]) || !isfinite(a->air[p]) ||
+                        !isfinite(a->dend[p]) || !isfinite(a->sph[p]) ||
+                        !isfinite(a->gr[p]) || !isfinite(a->br[p]) ||
+                        !isfinite(a->cn[p]) || !isfinite(a->age[p]) ||
+                        !isfinite(a->stress[p]);
+        }
+        nonfinite = nonfinite || !isfinite(bud.sensible) || !isfinite(bud.latent) ||
+                    !isfinite(bud.rain) || !isfinite(bud.olwr) ||
+                    !isfinite(bud.lwr_net) || !isfinite(bud.vapour_mass) ||
+                    !isfinite(bud.total) || !isfinite(a->buffer[c]);
+        if (nonfinite) {
+            a->fail[c] = FAIL_NONFINITE;
             a->fail_t[c] = t;
             return 4;
         }

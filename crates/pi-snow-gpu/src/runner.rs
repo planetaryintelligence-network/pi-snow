@@ -49,13 +49,36 @@ pub struct OutputTargets {
 }
 
 /// The grid mode's daily fields from a rebuilt column (same summation order).
-pub fn daily_fields(c: &Column) -> [f64; 5] {
+pub fn daily_fields(c: &Column, f32_path: bool) -> [f64; 5] {
+    if !f32_path {
+        return [
+            c.snow_height(),
+            c.swe(),
+            *c.node_temperature.last().unwrap(),
+            c.liquid_water(),
+            c.elements.len() as f64,
+        ];
+    }
+    // The grid kernel reduces these values in Real (f32 for A1). The hourly
+    // writer rebuilds a Column in f64, so reproduce the kernel conversion here.
+    let mut hs = -0.0f32;
+    let mut swe = -0.0f32;
+    let mut water = -0.0f32;
+    for e in &c.elements[c.soil_elements..] {
+        let thick = e.thickness as f32;
+        let ice = e.composition.ice as f32;
+        let liquid = e.composition.water as f32;
+        hs = hs + thick;
+        swe = swe + (ice * 917.0f32 + liquid * 1000.0f32) * thick;
+        water = water + liquid * 1000.0f32 * thick;
+    }
+    let t_c = (*c.node_temperature.last().unwrap() - 273.15) as f32;
     [
-        c.snow_height(),
-        c.swe(),
-        *c.node_temperature.last().unwrap(),
-        c.liquid_water(),
-        c.elements.len() as f64,
+        hs as f64,
+        swe as f64,
+        (t_c + 273.15f32) as f64,
+        water as f64,
+        c.snow_element_count() as f64,
     ]
 }
 
@@ -238,7 +261,10 @@ fn run_hourly_inner(
                     options,
                 );
                 if t.timestamp() % 86_400 == 43_200 {
-                    daily[c].push((t.timestamp(), daily_fields(&column)));
+                    daily[c].push((
+                        t.timestamp(),
+                        daily_fields(&column, gpu.build.precision.is_f32()),
+                    ));
                 }
                 let with_profile =
                     inputs[c].profile_times.as_ref().is_none_or(|k| k.contains(&t.timestamp()));
@@ -272,6 +298,10 @@ fn run_hourly_inner(
             )),
             gpu::FAIL_OVERFLOW => Some(format!(
                 "OVERFLOW (N_MAX {nmax}) at {}",
+                DateTime::from_timestamp(host.fail_t[c], 0).unwrap_or_default()
+            )),
+            gpu::FAIL_NONFINITE => Some(format!(
+                "NONFINITE state at {}",
                 DateTime::from_timestamp(host.fail_t[c], 0).unwrap_or_default()
             )),
             other => Some(format!("failure code {other}")),

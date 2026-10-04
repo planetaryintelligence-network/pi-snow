@@ -11,10 +11,35 @@ mod a5_gpu;
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("identity") => candidate_identity(&args[1..]),
         Some("lockstep") => lockstep_run(&args[1..]),
         Some("grid") => grid_run(&args[1..]),
-        _ => anyhow::bail!("usage: pi-snow-gpu-a5 lockstep|grid ..."),
+        _ => anyhow::bail!("usage: pi-snow-gpu-a5 identity|lockstep|grid ..."),
     }
+}
+
+fn candidate_identity(args: &[String]) -> Result<()> {
+    let mut values = std::collections::HashMap::new();
+    let mut it = args.iter();
+    while let Some(key) = it.next() {
+        let value = it.next().with_context(|| format!("{key} needs a value"))?;
+        if !matches!(key.as_str(), "--table" | "--axes") {
+            anyhow::bail!("unknown option {key}");
+        }
+        if values.insert(key.as_str(), value.as_str()).is_some() {
+            anyhow::bail!("duplicate option {key}");
+        }
+    }
+    let get = |name: &str| {
+        values
+            .get(name)
+            .copied()
+            .map(PathBuf::from)
+            .with_context(|| format!("{name} is required"))
+    };
+    let gpu = a5_gpu::new_f64(&get("--table")?, &get("--axes")?)?;
+    println!("{}", gpu.build.to_json());
+    Ok(())
 }
 
 fn lockstep_run(args: &[String]) -> Result<()> {

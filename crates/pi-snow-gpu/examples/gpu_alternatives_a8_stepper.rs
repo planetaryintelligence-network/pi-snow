@@ -9,8 +9,8 @@ use pi_snow_gpu::{forcing, stepper::{ForcingIndex, Outcome, SeasonWriter, Steppe
 use pi_snow_io::{ini::{Ini, RunConfig}, smet::Smet};
 
 fn state(elements: &[pi_snow_core::Element]) -> String {
-    elements.iter().map(|e| format!("{:.17},{:.17},{:.17},{:.17}",
-        e.thickness, e.micro.dendricity, e.micro.grain_radius, e.stress))
+    elements.iter().map(|e| format!("{:.17},{:.17},{:.17},{:.17},{:.17}",
+        e.thickness, e.micro.dendricity, e.micro.grain_radius, e.stress, e.ice_mass()))
         .collect::<Vec<_>>().join(";")
 }
 

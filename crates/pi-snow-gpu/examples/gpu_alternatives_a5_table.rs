@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, read_to_string};
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -5,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use pi_snow_core::constants::{GRAVITY, T_MELT, VON_KARMAN};
 use pi_snow_core::{Column, PhysicsOptions};
-use pi_snow_gpu::{forcing, stepper::{self, ForcingRow, Stepper}, unit};
+use pi_snow_gpu::{forcing, stepper::{self, ForcingRow, RunError, Stepper}, unit};
 use pi_snow_io::ini::{Ini, RunConfig};
 use pi_snow_physics::new_snow::Conditions;
 use pi_snow_physics::turbulence::{psi_h, psi_m};
@@ -27,6 +28,7 @@ struct Bounds {
     skipped_wind: u64,
     invalid_coordinates: u64,
     first_invalid: Option<String>,
+    frozen_refusals: Vec<String>,
 }
 
 impl Bounds {
@@ -88,12 +90,13 @@ fn scan_unit(ini: &Path, bounds: &mut Bounds) -> Result<()> {
     for row in &u.forcing.rows {
         let r = index.row(row);
         bounds.add(&st, &r, ini.parent().and_then(Path::file_name).and_then(|s| s.to_str()).unwrap_or("unknown"))?;
-        st.step(&r)?;
+        st.step(&r).with_context(|| format!("A5 source unit {} at {}", u.site.station_id, r.t))?;
     }
     Ok(())
 }
 
-fn scan_w_pixel(forcing_dir: &Path, template: &str, pixel: &forcing::Pixel, bounds: &mut Bounds) -> Result<()> {
+fn scan_w_pixel(forcing_dir: &Path, template: &str, pixel: &forcing::Pixel,
+    expected_refusals: &HashMap<String, String>, bounds: &mut Bounds) -> Result<()> {
     let mut raw = File::open(forcing_dir.join("forcing.f32"))?;
     let hourly = forcing::hourly_forcing(&forcing::read_hourly(&mut raw, pixel.index)?)?;
     let rows = forcing::expand(&hourly, 1, forcing::HOURS - 1);
@@ -103,7 +106,19 @@ fn scan_w_pixel(forcing_dir: &Path, template: &str, pixel: &forcing::Pixel, boun
     let mut st = Stepper::new(&cfg, &PhysicsOptions::default(), &site, start)?;
     for r in &rows {
         bounds.add(&st, r, &pixel.key)?;
-        st.step(r)?;
+        match st.step(r) {
+            Ok(_) => {}
+            Err(RunError::Crazy { time, .. }) => {
+                let got = time.format("%Y-%m-%dT%H:%M:%S").to_string();
+                let Some(expected) = expected_refusals.get(&pixel.key) else {
+                    bail!("unexpected A5 W refusal for {} at {got}", pixel.key);
+                };
+                if &got != expected { bail!("A5 W refusal mismatch for {}: expected {expected}, got {got}", pixel.key); }
+                bounds.frozen_refusals.push(format!("{}\t{}", pixel.key, got));
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }
@@ -147,7 +162,7 @@ fn corrections(ri: f64, zw: f64, zs: f64, z0: f64) -> (f64, f64) {
 
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect();
-    if a.len() != 7 { bail!("usage: a5-table UNIT_INI_LIST FORCING_DIR INI_TEMPLATE W_PIXEL_INDICES OUT_DIR ROUGHNESS_LENGTH") }
+    if a.len() != 8 { bail!("usage: a5-table UNIT_INI_LIST FORCING_DIR INI_TEMPLATE W_PIXEL_INDICES FROZEN_REFUSALS OUT_DIR ROUGHNESS_LENGTH") }
     let units = read_to_string(&a[1])?;
     let mut unit_count = 0;
     let mut bounds = Bounds::new();
@@ -157,9 +172,23 @@ fn main() -> Result<()> {
     let template = read_to_string(&a[3])?;
     let pixel_rows = forcing::read_pixels(&forcing_dir.join("pixels.tsv"))?;
     let indices: Vec<usize> = read_to_string(&a[4])?.lines().filter(|s| !s.trim().is_empty()).map(str::parse).collect::<Result<_, _>>()?;
+    let mut expected_refusals = HashMap::new();
+    for line in read_to_string(&a[5])?.lines().filter(|s| !s.trim().is_empty()) {
+        let (key, time) = line.split_once('\t').context("frozen refusal line needs key<TAB>UTC timestamp")?;
+        if expected_refusals.insert(key.to_string(), time.to_string()).is_some() { bail!("duplicate frozen refusal {key}"); }
+    }
+    if expected_refusals.len() != 2 || expected_refusals.get("px_299_329").map(String::as_str) != Some("2026-01-13T16:10:00")
+        || expected_refusals.get("px_410_265").map(String::as_str) != Some("2026-01-14T00:10:00") {
+        bail!("frozen W refusals differ from the two registered F64 events");
+    }
     for index in &indices {
         let pixel = pixel_rows.get(*index).with_context(|| format!("W pixel index {index} is absent"))?;
-        scan_w_pixel(forcing_dir, &template, pixel, &mut bounds)?;
+        scan_w_pixel(forcing_dir, &template, pixel, &expected_refusals, &mut bounds)?;
+    }
+    let observed: HashSet<&str> = bounds.frozen_refusals.iter().map(|x| x.as_str()).collect();
+    let expected: HashSet<String> = expected_refusals.iter().map(|(k, t)| format!("{k}\t{t}")).collect();
+    if observed.len() != expected.len() || expected.iter().any(|e| !observed.contains(e.as_str())) {
+        bail!("the W scan did not reproduce the two registered frozen refusals");
     }
     if bounds.samples == 0 || bounds.ri_min >= bounds.ri_max { bail!("empty or degenerate A5 sample range"); }
     let ri_pad = 0.1 * (bounds.ri_max - bounds.ri_min);
@@ -169,9 +198,9 @@ fn main() -> Result<()> {
     let ri_axis = axis_ri(ri_lo, ri_hi);
     let zw_axis = axis_log(zw_lo, zw_hi);
     let zs_axis = axis_log(zs_lo, zs_hi);
-    let output = Path::new(&a[5]);
+    let output = Path::new(&a[6]);
     std::fs::create_dir_all(output)?;
-    let z0: f64 = a[6].parse()?;
+    let z0: f64 = a[7].parse()?;
     let file = File::create(output.join("mo-table-f64.bin"))?;
     let mut writer = BufWriter::new(file);
     for ri in &ri_axis { for zw in &zw_axis { for zs in &zs_axis {
@@ -187,9 +216,10 @@ fn main() -> Result<()> {
     let zw_text = zw_axis.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(",");
     let zs_text = zs_axis.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(",");
     let manifest = format!(
-        "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"invalid_coordinate_fallbacks\":{},\n  \"first_invalid_coordinate\":{},\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio\"\n}}\n",
+        "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"invalid_coordinate_fallbacks\":{},\n  \"first_invalid_coordinate\":{},\n  \"registered_frozen_refusals\":[{}],\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio\"\n}}\n",
         indices.len(), bounds.samples, bounds.skipped_wind,
         bounds.invalid_coordinates, bounds.first_invalid.as_ref().map_or("null".into(), |s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))),
+        bounds.frozen_refusals.iter().map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join(","),
         fmt(bounds.ri_min), fmt(bounds.ri_max), fmt(ri_lo), fmt(ri_hi),
         fmt(bounds.zw_min), fmt(bounds.zw_max), fmt(zw_lo), fmt(zw_hi),
         fmt(bounds.zs_min), fmt(bounds.zs_max), fmt(zs_lo), fmt(zs_hi),

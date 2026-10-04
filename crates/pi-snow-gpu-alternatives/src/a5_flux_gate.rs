@@ -63,7 +63,7 @@ pub struct Tally {
     pub table_flux_samples: u64,
     pub loop_flux_samples: u64,
     pub flux_gate_failures: u64,
-    pub nonfinite_refusals: u64,
+    pub candidate_refusals: u64,
     pub max_abs_qs_w_m2: f64,
     pub max_abs_ql_w_m2: f64,
 }
@@ -109,7 +109,7 @@ impl Tally {
         let mut s = String::new();
         let _ = write!(
             s,
-            "{{\"steps\": {}, \"comparisons\": {}, \"agreeing\": {}, \"bitwise\": {}, \"count_mismatch_steps\": {}, \"count_change_causes\": {{\"deposition\": {}, \"merge\": {}, \"melt_out\": {}}}, \"count_change_events\": [{}], \"marker_mismatch_steps\": {}, \"outcome_mismatch_steps\": {}, \"mo_pass_mismatch_steps\": {}, \"mo_multi_pass_steps_gpu\": {}, \"mo_multi_pass_steps_cpu\": {}, \"mo_pass_histogram_gpu\": {:?}, \"mo_pass_histogram_cpu\": {:?}, \"marker_activated_gpu\": {}, \"marker_activated_cpu\": {}, \"marker_activation_disagreements\": {}, \"grain_0513_flips\": {}, \"grain_0513_flip_steps\": {}, \"hardness_0534_flips\": {}, \"hardness_0534_flip_steps\": {}, \"tolerance_site_steps\": {{\"deposition_epsilon\": {}, \"melted_out_ice\": {}, \"refrozen_marker\": {}, \"gradient_thickness_floor\": {}, \"heat_linearisation_delta\": {}}}, \"rel_tol\": {:e}, \"scale_factor\": {:e}, \"max_rel_among_agreeing\": {:e}, \"a5_table_flux_samples\": {}, \"a5_loop_flux_samples\": {}, \"a5_flux_gate_failures\": {}, \"nonfinite_refusals\": {}, \"cpu_refusals\": {}, \"max_abs_qs_w_m2\": {:e}, \"max_abs_ql_w_m2\": {:e}, \"listed\": [{}]}}",
+            "{{\"steps\": {}, \"comparisons\": {}, \"agreeing\": {}, \"bitwise\": {}, \"count_mismatch_steps\": {}, \"count_change_causes\": {{\"deposition\": {}, \"merge\": {}, \"melt_out\": {}}}, \"count_change_events\": [{}], \"marker_mismatch_steps\": {}, \"outcome_mismatch_steps\": {}, \"mo_pass_mismatch_steps\": {}, \"mo_multi_pass_steps_gpu\": {}, \"mo_multi_pass_steps_cpu\": {}, \"mo_pass_histogram_gpu\": {:?}, \"mo_pass_histogram_cpu\": {:?}, \"marker_activated_gpu\": {}, \"marker_activated_cpu\": {}, \"marker_activation_disagreements\": {}, \"grain_0513_flips\": {}, \"grain_0513_flip_steps\": {}, \"hardness_0534_flips\": {}, \"hardness_0534_flip_steps\": {}, \"tolerance_site_steps\": {{\"deposition_epsilon\": {}, \"melted_out_ice\": {}, \"refrozen_marker\": {}, \"gradient_thickness_floor\": {}, \"heat_linearisation_delta\": {}}}, \"rel_tol\": {:e}, \"scale_factor\": {:e}, \"max_rel_among_agreeing\": {:e}, \"a5_table_flux_samples\": {}, \"a5_loop_flux_samples\": {}, \"a5_flux_gate_failures\": {}, \"candidate_refusals\": {}, \"cpu_refusals\": {}, \"max_abs_qs_w_m2\": {:e}, \"max_abs_ql_w_m2\": {:e}, \"listed\": [{}]}}",
             self.steps,
             self.comparisons,
             self.agreeing,
@@ -139,7 +139,7 @@ impl Tally {
             self.table_flux_samples,
             self.loop_flux_samples,
             self.flux_gate_failures,
-            self.nonfinite_refusals,
+            self.candidate_refusals,
             self.max_abs_qs_w_m2,
             self.max_abs_ql_w_m2,
             self.listed
@@ -470,14 +470,20 @@ fn run_with_tolerance(
                 .iter()
                 .all(|e| crate::gpu::element_values(e).iter().all(|v| v.is_finite()))
                 && s.column.node_temperature.iter().all(|v| v.is_finite());
-            let gpu_n_finite = (0..gpu_n).all(|i| {
+            let gpu_n_within_capacity = gpu_n <= nmax;
+            let gpu_n_finite = (0..gpu_n.min(nmax)).all(|i| {
                 (0..gpu::ELEMENT_FIELDS.len()).all(|f| host.elem[f][i * b + c].is_finite())
-            }) && (0..=gpu_n).all(|i| host.t[i * b + c].is_finite());
+            }) && (0..=gpu_n.min(nmax)).all(|i| host.t[i * b + c].is_finite());
             let accum_finite = gpu_acc.to_array().iter().all(|v| v.is_finite());
-            if !cpu_state_finite || !gpu_n_finite || !accum_finite || gpu_failed {
-                tally.nonfinite_refusals += 1;
+            if !cpu_state_finite
+                || !gpu_n_finite
+                || !gpu_n_within_capacity
+                || !accum_finite
+                || gpu_failed
+            {
+                tally.candidate_refusals += 1;
                 if tally.listed.len() < LIST_LIMIT {
-                    tally.listed.push(format!("{ctx}\trefusal nonfinite_or_gpu_failure={} gpu_state_finite={} cpu_state_finite={} accum_finite={}", gpu_failed, gpu_n_finite, cpu_state_finite, accum_finite));
+                    tally.listed.push(format!("{ctx}\trefusal nonfinite_or_gpu_failure={} gpu_state_finite={} cpu_state_finite={} gpu_n_within_capacity={} accum_finite={}", gpu_failed, gpu_n_finite, cpu_state_finite, gpu_n_within_capacity, accum_finite));
                 }
                 tally.flux_gate_failures += 1;
             } else if cpu_advanced && host.mo_passes[c] == -1 {

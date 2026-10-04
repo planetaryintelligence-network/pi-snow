@@ -308,6 +308,32 @@ pub fn write_output_smet(
     slope_azimuth_deg: f64,
     rows: &[OutputRow],
 ) -> String {
+    write_output_smet_with_acdd(
+        station_id,
+        station_name,
+        latitude,
+        longitude,
+        altitude,
+        slope_angle_deg,
+        slope_azimuth_deg,
+        rows,
+        true,
+    )
+}
+
+/// Write a complete output time series, optionally including the ACDD creator field.
+#[allow(clippy::too_many_arguments)]
+pub fn write_output_smet_with_acdd(
+    station_id: &str,
+    station_name: &str,
+    latitude: f64,
+    longitude: f64,
+    altitude: f64,
+    slope_angle_deg: f64,
+    slope_azimuth_deg: f64,
+    rows: &[OutputRow],
+    acdd_write: bool,
+) -> String {
     let mut out = String::from("SMET 1.1 ASCII\n[HEADER]\n");
     let mut kv = |k: &str, v: String| out.push_str(&format!("{k:<16} = {v}\n"));
     kv("station_id", station_id.to_string());
@@ -322,10 +348,12 @@ pub fn write_output_smet(
     kv("slope_angle", format!("{slope_angle_deg}"));
     kv("slope_azi", format!("{slope_azimuth_deg}"));
     kv("fields", format!("timestamp {}", OUTPUT_FIELDS.join(" ")));
-    kv(
-        "creator_name",
-        format!("pi-snow {}", env!("CARGO_PKG_VERSION")),
-    );
+    if acdd_write {
+        kv(
+            "creator_name",
+            format!("pi-snow {}", env!("CARGO_PKG_VERSION")),
+        );
+    }
     out.push_str("[DATA]\n");
     for row in rows {
         out.push_str(&row.timestamp.format("%Y-%m-%dT%H:%M:%S").to_string());

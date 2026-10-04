@@ -31,10 +31,10 @@ use pi_snow_io::smet::{OutputRow, Smet};
 use pi_snow_physics::albedo;
 use pi_snow_physics::aoki_albedo::{self, AokiAlbedo};
 use pi_snow_physics::atmosphere::pressure_at_altitude;
-use pi_snow_physics::grain_classification;
 use pi_snow_physics::density_settlement::{
     DensitySettlementViscosity, Scheme as DensitySettlementScheme,
 };
+use pi_snow_physics::grain_classification;
 use pi_snow_physics::metamorphism::{self, History, Local};
 use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
 use pi_snow_physics::settlement::{self, Viscosity};
@@ -225,21 +225,22 @@ pub fn run_with_options(
                        steps: usize,
                        ledger: Option<Ledger>,
                        density_events: Option<String>| RunOutput {
-            smet: pi_snow_io::smet::write_output_smet(
-                &site.station_id,
-                &site.station_name,
-                site.latitude,
-                site.longitude,
-                site.altitude,
-                site.slope_angle,
-                site.slope_azimuth,
-                &rows,
-            ),
-            pro: pro_text,
-            steps,
-            mass: ledger.map(Ledger::into_text),
-            density_events,
-        };
+        smet: pi_snow_io::smet::write_output_smet_with_acdd(
+            &site.station_id,
+            &site.station_name,
+            site.latitude,
+            site.longitude,
+            site.altitude,
+            site.slope_angle,
+            site.slope_azimuth,
+            &rows,
+            cfg.acdd_write,
+        ),
+        pro: pro_text,
+        steps,
+        mass: ledger.map(Ledger::into_text),
+        density_events,
+    };
 
     for row in &forcing.rows {
         let t = row.timestamp;

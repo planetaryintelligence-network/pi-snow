@@ -91,6 +91,26 @@ fn pi_snow(unit: &Path) -> std::process::Output {
         .unwrap()
 }
 
+fn set_flag(unit: &Path, key: &str, value: &str) {
+    let path = unit.join("snowpack.ini");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let prefix = format!("{key} =");
+    let mut found = false;
+    let lines: Vec<_> = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with(&prefix) {
+                found = true;
+                format!("{key} = {value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    assert!(found, "fixture lacks {key}");
+    std::fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
 #[test]
 fn finite_forcing_runs_to_the_end_with_no_non_finite_output() {
     let unit = stage("clean", None);
@@ -126,6 +146,17 @@ fn a_nan_under_snow_exits_non_zero_naming_the_step_and_the_field() {
     let last = smet.lines().last().unwrap();
     assert!(last.starts_with("2026-01-03T18:00"), "{last}");
     assert!(unit.join("output/ULAMB1_hrrr-terrain-v1.pro").is_file());
+}
+
+#[test]
+fn finite_guard_partial_write_obeys_both_file_flags() {
+    let unit = stage("nan-no-output", Some((400, "TA", "NaN")));
+    set_flag(&unit, "PROF_WRITE", "false");
+    set_flag(&unit, "TS_WRITE", "false");
+    assert!(!pi_snow(&unit).status.success());
+    let stem = unit.join("output/ULAMB1_hrrr-terrain-v1");
+    assert!(!stem.with_extension("pro").exists());
+    assert!(!stem.with_extension("smet").exists());
 }
 
 #[test]

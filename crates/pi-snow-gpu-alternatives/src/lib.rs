@@ -14,6 +14,7 @@ pub mod gpu;
 pub mod grid;
 pub mod sha256;
 pub mod lockstep;
+pub mod a5_flux_gate;
 pub mod mo;
 pub mod runner;
 pub mod synth;

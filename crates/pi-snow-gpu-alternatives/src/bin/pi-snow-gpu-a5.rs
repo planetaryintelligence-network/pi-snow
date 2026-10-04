@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use pi_snow_gpu_alternatives::{batch, lockstep, runner::ColumnInput};
+use pi_snow_gpu_alternatives::{a5_flux_gate, batch, lockstep, runner::ColumnInput};
 
 #[path = "../a5_gpu.rs"]
 mod a5_gpu;
@@ -13,9 +13,44 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("identity") => candidate_identity(&args[1..]),
         Some("lockstep") => lockstep_run(&args[1..]),
+        Some("flux-gate") => flux_gate_run(&args[1..]),
         Some("grid") => grid_run(&args[1..]),
-        _ => anyhow::bail!("usage: pi-snow-gpu-a5 identity|lockstep|grid ..."),
+        _ => anyhow::bail!("usage: pi-snow-gpu-a5 identity|lockstep|flux-gate|grid ..."),
     }
+}
+
+fn flux_gate_run(args: &[String]) -> Result<()> {
+    let (parsed, extras) = batch::parse_args_with(args, &["--table", "--axes", "--from", "--to"])?;
+    let get = |name: &str| -> Result<String> {
+        extras
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+            .with_context(|| format!("{name} is required"))
+    };
+    let table = PathBuf::from(get("--table")?);
+    let axes = PathBuf::from(get("--axes")?);
+    let from: usize = get("--from")?.parse()?;
+    let to: usize = get("--to")?.parse()?;
+    let mut loaded = Vec::new();
+    for job in &parsed.jobs {
+        loaded.push(batch::load(job)?);
+    }
+    let inputs: Vec<ColumnInput> = loaded
+        .iter()
+        .map(|(unit, rows)| ColumnInput {
+            cfg: &unit.cfg,
+            site: &unit.site,
+            start: unit.start.clone(),
+            rows: rows.clone(),
+            profile_times: None,
+        })
+        .collect();
+    let gpu = a5_gpu::new_f64(&table, &axes)?;
+    eprintln!("{}", gpu.build.to_json());
+    let tally = a5_flux_gate::run(&gpu, &inputs, parsed.nmax, from, to)?;
+    println!("{}", tally.to_json());
+    Ok(())
 }
 
 fn candidate_identity(args: &[String]) -> Result<()> {

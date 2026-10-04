@@ -62,10 +62,10 @@ using AccumReal = Real;
 #define MARK_REFROZEN 1u
 
 // A5 globals use software interpolation because CUDA has no f64 texture channel.
-extern "C" __device__ double A5_TABLE[1026 * 32 * 32 * 2];
-extern "C" __device__ double A5_RI[1026];
-extern "C" __device__ double A5_ZW[32];
-extern "C" __device__ double A5_ZS[32];
+extern "C" __device__ double A5_TABLE[1026 * 32 * 32 * 2] = {};
+extern "C" __device__ double A5_RI[1026] = {};
+extern "C" __device__ double A5_ZW[32] = {};
+extern "C" __device__ double A5_ZS[32] = {};
 
 #if defined(PI_F32) || defined(PI_F32K)
 #define XEXP(x) expf((float)(x))

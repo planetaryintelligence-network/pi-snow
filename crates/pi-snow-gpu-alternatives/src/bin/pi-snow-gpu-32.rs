@@ -61,7 +61,8 @@ fn load_inputs(v: &std::collections::BTreeMap<String, String>) -> Result<(Vec<fo
 
 fn preflight(v: &std::collections::BTreeMap<String, String>) -> Result<()> {
     let (_, hourly, packed) = load_inputs(v)?;
-    let result = packed_result(&hourly, &packed, None, None, None);
+    let result = packed_result(&hourly, &packed, None, None, None)
+        .replacen("\"state\":\"scored\"", "\"state\":\"packing-preflight\"", 1);
     std::fs::write(PathBuf::from(arg(v, "--out")), result.as_bytes())?;
     println!("{}", result.trim());
     Ok(())

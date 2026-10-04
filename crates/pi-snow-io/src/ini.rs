@@ -123,6 +123,10 @@ pub struct RunConfig {
     pub experiment: String,
     pub meteo_path: String,
     pub output_path: String,
+    pub prof_write: bool,
+    pub ts_write: bool,
+    pub snow_write: bool,
+    pub acdd_write: bool,
     /// `CALCULATION_STEP_LENGTH`, converted from minutes.
     pub step_seconds: f64,
     /// `TS_DAYS_BETWEEN`, converted from days. `PROF_DAYS_BETWEEN` must match.
@@ -317,6 +321,10 @@ impl RunConfig {
             experiment: lookup(ini, &key("OUTPUT", "EXPERIMENT", Some("NO_EXP")))?,
             meteo_path: lookup(ini, &key("INPUT", "METEOPATH", None))?,
             output_path: lookup(ini, &key("OUTPUT", "METEOPATH", None))?,
+            prof_write: boolean(ini, &key("OUTPUT", "PROF_WRITE", None))?,
+            ts_write: boolean(ini, &key("OUTPUT", "TS_WRITE", None))?,
+            snow_write: boolean(ini, &key("OUTPUT", "SNOW_WRITE", Some("true")))?,
+            acdd_write: boolean(ini, &key("OUTPUT", "ACDD_WRITE", Some("false")))?,
             step_seconds: 60.0 * n(key("SNOWPACK", "CALCULATION_STEP_LENGTH", None))?,
             output_interval_seconds: (86_400.0 * ts).round(),
             stability,
@@ -371,4 +379,18 @@ fn number(ini: &Ini, k: &Key) -> Result<f64, ConfigError> {
             key: k.name.into(),
             value,
         })
+}
+
+fn boolean(ini: &Ini, k: &Key) -> Result<bool, ConfigError> {
+    let value = lookup(ini, k)?;
+    if value.eq_ignore_ascii_case("true") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        Ok(false)
+    } else {
+        Err(ConfigError::BadValue {
+            key: k.name.into(),
+            value,
+        })
+    }
 }

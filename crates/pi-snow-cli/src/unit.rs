@@ -101,8 +101,12 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
     let output: PathBuf = root.join(&cfg.output_path);
     std::fs::create_dir_all(&output)?;
     let stem = output.join(format!("{}_{}", cfg.station_id, cfg.experiment));
-    std::fs::write(stem.with_extension("smet"), &out.smet)?;
-    std::fs::write(stem.with_extension("pro"), &out.pro)?;
+    if cfg.ts_write {
+        std::fs::write(stem.with_extension("smet"), &out.smet)?;
+    }
+    if cfg.prof_write {
+        std::fs::write(stem.with_extension("pro"), &out.pro)?;
+    }
     // The ledger (MASS_REPORT=LEDGER) is written here, not in main, so batch
     // mode carries it too.
     if let Some(mass) = &out.mass {

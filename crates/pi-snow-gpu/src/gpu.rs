@@ -245,8 +245,34 @@ impl Gpu {
 }
 
 /// The run constants the kernel reads as `k[K_*]`.
-pub fn run_constants(cfg: &RunConfig, constants: &Constants) -> [f64; K_COUNT] {
-    [
+fn kernel_scheme_parameters(scheme: Scheme, density_scheme: DensityScheme) -> Result<(f64, f64)> {
+    let stability = match scheme {
+        Scheme::MoHoltslag => 0.0,
+        Scheme::Louis => 1.0,
+        Scheme::MoHoltslagScalarHeight => {
+            bail!("stability scheme MoHoltslagScalarHeight is not ported to the GPU")
+        }
+        Scheme::MoHoltslagZetaLimited => {
+            bail!("stability scheme MoHoltslagZetaLimited is not ported to the GPU")
+        }
+    };
+    let density = match density_scheme {
+        DensityScheme::Pahaut => 0.0,
+        DensityScheme::Zwart => 1.0,
+        DensityScheme::Zwart2007Eq51 => {
+            bail!("density scheme Zwart2007Eq51 is not ported to the GPU")
+        }
+        DensityScheme::Anderson1976 => {
+            bail!("density scheme Anderson1976 is not ported to the GPU")
+        }
+    };
+    Ok((stability, density))
+}
+
+pub fn run_constants(cfg: &RunConfig, constants: &Constants) -> Result<[f64; K_COUNT]> {
+    let (stability, density) =
+        kernel_scheme_parameters(constants.scheme, constants.density_scheme)?;
+    Ok([
         cfg.thresh_rain_c,
         cfg.height_new_element,
         0.5e-3 * cfg.new_snow_grain_size_mm,
@@ -256,20 +282,13 @@ pub fn run_constants(cfg: &RunConfig, constants: &Constants) -> [f64; K_COUNT] {
         cfg.minimum_element_length,
         cfg.t_crazy_min,
         cfg.t_crazy_max,
-        match constants.scheme {
-            Scheme::MoHoltslag => 0.0,
-            Scheme::Louis => 1.0,
-        },
-        match constants.density_scheme {
-            DensityScheme::Pahaut => 0.0,
-            DensityScheme::Zwart => 1.0,
-            DensityScheme::Zwart2007Eq51 => -1.0,
-        },
+        stability,
+        density,
         R_DRY,
         CP_AIR,
         EPSILON,
         SNOW_EMISSIVITY,
-    ]
+    ])
 }
 
 /// The per-column parameters `par[P_*]`, each computed with the expression the CPU
@@ -294,9 +313,7 @@ pub fn column_params(site: &Site, constants: &Constants) -> [f64; P_COUNT] {
 
 /// Refuse what the kernel does not carry (plan.md section 3.3).
 pub fn check_supported(cfg: &RunConfig, constants: &Constants, start: &Column) -> Result<()> {
-    if constants.density_scheme == DensityScheme::Zwart2007Eq51 {
-        bail!("density scheme Zwart2007Eq51 is not ported");
-    }
+    kernel_scheme_parameters(constants.scheme, constants.density_scheme)?;
     if start.soil_elements != 0 {
         bail!("soil elements are not ported");
     }
@@ -310,6 +327,25 @@ pub fn check_supported(cfg: &RunConfig, constants: &Constants, start: &Column) -
     }
     let _ = cfg;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_physics_schemes_are_refused() {
+        for scheme in [Scheme::MoHoltslagScalarHeight, Scheme::MoHoltslagZetaLimited] {
+            let error = kernel_scheme_parameters(scheme, DensityScheme::Pahaut).unwrap_err();
+            assert!(error.to_string().contains(&format!("{scheme:?}")));
+            assert!(error.to_string().contains("not ported to the GPU"));
+        }
+
+        let error = kernel_scheme_parameters(Scheme::MoHoltslag, DensityScheme::Anderson1976)
+            .unwrap_err();
+        assert!(error.to_string().contains("Anderson1976"));
+        assert!(error.to_string().contains("not ported to the GPU"));
+    }
 }
 
 /// Host copy of a batch's state, in the kernel's layout.

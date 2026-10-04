@@ -169,10 +169,10 @@ fn run_with_tolerance(
         .iter()
         .map(|i| Stepper::new(i.cfg, &options, i.site, i.start.clone()))
         .collect::<Result<Vec<_>, _>>()?;
-    let k = gpu::run_constants(inputs[0].cfg, &steppers[0].constants);
+    let k = gpu::run_constants(inputs[0].cfg, &steppers[0].constants)?;
     let mut par = vec![0.0; gpu::P_COUNT * b];
     for (c, (i, s)) in inputs.iter().zip(&steppers).enumerate() {
-        if gpu::run_constants(i.cfg, &s.constants).map(f64::to_bits) != k.map(f64::to_bits) {
+        if gpu::run_constants(i.cfg, &s.constants)?.map(f64::to_bits) != k.map(f64::to_bits) {
             bail!("columns must share run constants");
         }
         gpu::check_supported(i.cfg, &s.constants, &i.start)?;

@@ -203,8 +203,16 @@ fn main() -> Result<()> {
     let z0: f64 = a[7].parse()?;
     let file = File::create(output.join("mo-table-f64.bin"))?;
     let mut writer = BufWriter::new(file);
+    let mut unused_cliff_nodes = 0_u64;
     for ri in &ri_axis { for zw in &zw_axis { for zs in &zs_axis {
-        let (dm, dh) = corrections(*ri, *zw * z0, *zs * z0, z0);
+        // A5 always calls the original loop at and above this cliff. Those
+        // table slots are unreachable; zero keeps the serialized grid finite.
+        let (dm, dh) = if *ri >= 0.05 {
+            unused_cliff_nodes += 1;
+            (0.0, 0.0)
+        } else {
+            corrections(*ri, *zw * z0, *zs * z0, z0)
+        };
         if !dm.is_finite() || !dh.is_finite() { bail!("non-finite table node ri={ri} zw/z0={zw} zs/z0={zs}"); }
         writer.write_all(&dm.to_le_bytes())?;
         writer.write_all(&dh.to_le_bytes())?;
@@ -216,10 +224,11 @@ fn main() -> Result<()> {
     let zw_text = zw_axis.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(",");
     let zs_text = zs_axis.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(",");
     let manifest = format!(
-        "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"invalid_coordinate_fallbacks\":{},\n  \"first_invalid_coordinate\":{},\n  \"registered_frozen_refusals\":[{}],\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio\"\n}}\n",
+        "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"invalid_coordinate_fallbacks\":{},\n  \"first_invalid_coordinate\":{},\n  \"registered_frozen_refusals\":[{}],\n  \"unused_ri_ge_0.05_zero_slots\":{},\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio; zero placeholders for loop-only Ri_b >= 0.05 nodes\"\n}}\n",
         indices.len(), bounds.samples, bounds.skipped_wind,
         bounds.invalid_coordinates, bounds.first_invalid.as_ref().map_or("null".into(), |s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))),
         bounds.frozen_refusals.iter().map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join(","),
+        unused_cliff_nodes,
         fmt(bounds.ri_min), fmt(bounds.ri_max), fmt(ri_lo), fmt(ri_hi),
         fmt(bounds.zw_min), fmt(bounds.zw_max), fmt(zw_lo), fmt(zw_hi),
         fmt(bounds.zs_min), fmt(bounds.zs_max), fmt(zs_lo), fmt(zs_hi),

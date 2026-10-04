@@ -25,6 +25,8 @@ struct Bounds {
     zs_max: f64,
     samples: u64,
     skipped_wind: u64,
+    invalid_coordinates: u64,
+    first_invalid: Option<String>,
 }
 
 impl Bounds {
@@ -34,7 +36,7 @@ impl Bounds {
             zs_min: f64::INFINITY, zs_max: f64::NEG_INFINITY, ..Self::default() }
     }
 
-    fn add(&mut self, stepper: &Stepper<'_>, row: &ForcingRow) -> Result<()> {
+    fn add(&mut self, stepper: &Stepper<'_>, row: &ForcingRow, source: &str) -> Result<()> {
         if stepper.previous.is_none() { return Ok(()); }
         let (Some(ta), Some(rh), Some(wind), Some(_), Some(_)) =
             (row.ta, row.rh, row.vw, row.iswr, row.ilwr) else { return Ok(()) };
@@ -58,11 +60,15 @@ impl Bounds {
         } else {
             *column.node_temperature.last().context("post-deposition surface node")?
         };
-        let mean_t = 0.5 * (ta + t_surface);
+        let (z0, mean_t) = (stepper.cfg.roughness_length, 0.5 * (ta + t_surface));
         let ri = GRAVITY * z_wind * (ta - t_surface) / (mean_t * wind * wind);
-        let (zw, zs) = (z_wind / stepper.cfg.roughness_length, z_scalar / stepper.cfg.roughness_length);
+        let (zw, zs) = (z_wind / z0, z_scalar / z0);
         if !ri.is_finite() || !zw.is_finite() || !zs.is_finite() || zw <= 0.0 || zs <= 0.0 {
-            bail!("non-finite A5 axis sample at {}", row.t);
+            self.invalid_coordinates += 1;
+            if self.first_invalid.is_none() {
+                self.first_invalid = Some(format!("{source} {} TA={ta} T_surface={t_surface} HS={hs} z0={z0} Ri={ri} z_wind/z0={zw} z_scalar/z0={zs}", row.t));
+            }
+            return Ok(());
         }
         self.ri_min = self.ri_min.min(ri);
         self.ri_max = self.ri_max.max(ri);
@@ -81,7 +87,7 @@ fn scan_unit(ini: &Path, bounds: &mut Bounds) -> Result<()> {
     let mut st = Stepper::new(&u.cfg, &PhysicsOptions::default(), &u.site, u.start.clone())?;
     for row in &u.forcing.rows {
         let r = index.row(row);
-        bounds.add(&st, &r)?;
+        bounds.add(&st, &r, ini.parent().and_then(Path::file_name).and_then(|s| s.to_str()).unwrap_or("unknown"))?;
         st.step(&r)?;
     }
     Ok(())
@@ -96,7 +102,7 @@ fn scan_w_pixel(forcing_dir: &Path, template: &str, pixel: &forcing::Pixel, boun
     let start = Column::bare_ground(T_MELT, site.slope_angle, site.slope_azimuth);
     let mut st = Stepper::new(&cfg, &PhysicsOptions::default(), &site, start)?;
     for r in &rows {
-        bounds.add(&st, r)?;
+        bounds.add(&st, r, &pixel.key)?;
         st.step(r)?;
     }
     Ok(())
@@ -181,15 +187,16 @@ fn main() -> Result<()> {
     let zw_text = zw_axis.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(",");
     let zs_text = zs_axis.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(",");
     let manifest = format!(
-        "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio\"\n}}\n",
+        "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"invalid_coordinate_fallbacks\":{},\n  \"first_invalid_coordinate\":{},\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio\"\n}}\n",
         indices.len(), bounds.samples, bounds.skipped_wind,
+        bounds.invalid_coordinates, bounds.first_invalid.as_ref().map_or("null".into(), |s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))),
         fmt(bounds.ri_min), fmt(bounds.ri_max), fmt(ri_lo), fmt(ri_hi),
         fmt(bounds.zw_min), fmt(bounds.zw_max), fmt(zw_lo), fmt(zw_hi),
         fmt(bounds.zs_min), fmt(bounds.zs_max), fmt(zs_lo), fmt(zs_hi),
         ri_axis.len(), zw_axis.len(), zs_axis.len(), ri_text, zw_text, zs_text);
     std::fs::write(output.join("table.json"), manifest)?;
-    println!("units={unit_count} W={} samples={} Ri=[{},{}] z_wind/z0=[{},{}] z_scalar/z0=[{},{}] table_bytes={}",
-        indices.len(), bounds.samples, fmt(ri_lo), fmt(ri_hi), fmt(zw_lo), fmt(zw_hi), fmt(zs_lo), fmt(zs_hi),
+    println!("units={unit_count} W={} samples={} invalid_coordinate_fallbacks={} Ri=[{},{}] z_wind/z0=[{},{}] z_scalar/z0=[{},{}] table_bytes={}",
+        indices.len(), bounds.samples, bounds.invalid_coordinates, fmt(ri_lo), fmt(ri_hi), fmt(zw_lo), fmt(zw_hi), fmt(zs_lo), fmt(zs_hi),
         std::fs::metadata(output.join("mo-table-f64.bin"))?.len());
     let _ = PLAN;
     Ok(())

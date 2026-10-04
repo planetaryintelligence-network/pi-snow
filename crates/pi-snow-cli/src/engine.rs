@@ -48,6 +48,7 @@ use pi_snow_physics::water;
 use pi_snow_physics::wet_growth;
 
 use crate::ledger::{Interval, Ledger};
+use crate::meltout_diagnostic::MeltoutDiagnostic;
 
 /// Marker bits kept in `Microstructure::marker`.
 const MARK_REFROZEN: u16 = 1;
@@ -106,6 +107,9 @@ pub struct RunOutput {
     pub mass: Option<String>,
     /// Initial density and forcing conditions for newly deposited elements.
     pub density_events: Option<String>,
+    /// Dirichlet lower-boundary reconstruction, enabled by
+    /// `PI_SNOW_MELTOUT_DIAGNOSTICS=1`.
+    pub meltout_diagnostic: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -222,11 +226,15 @@ pub fn run_with_options(
         .then(|| String::from("timestamp_utc,event,element,initial_density_kg_m3,element_mass_kg_m2,element_height_m,air_temp_c,surface_temp_c,relative_humidity,wind_m_s\n"));
     let mut density_event_number = 0usize;
     let mut interval = Interval::default();
+    let mut meltout_diagnostic = std::env::var_os("PI_SNOW_MELTOUT_DIAGNOSTICS")
+        .is_some_and(|value| value == "1")
+        .then(MeltoutDiagnostic::new);
     let make_output = |rows: Vec<OutputRow>,
                        pro_text: String,
                        steps: usize,
                        ledger: Option<Ledger>,
-                       density_events: Option<String>| RunOutput {
+                       density_events: Option<String>,
+                       meltout_diagnostic: Option<String>| RunOutput {
         smet: pi_snow_io::smet::write_output_smet_with_acdd(
             &site.station_id,
             &site.station_name,
@@ -242,6 +250,7 @@ pub fn run_with_options(
         steps,
         mass: ledger.map(Ledger::into_text),
         density_events,
+        meltout_diagnostic,
     };
 
     for row in &forcing.rows {
@@ -388,6 +397,10 @@ pub fn run_with_options(
             };
             // 4. Energy balance and conduction.
             let before = thermal::internal_energy(&column);
+            let bottom_before = column
+                .elements
+                .first()
+                .map(|bottom| (bottom.thickness, bottom.density()));
             let step_surface = match options.surface_linearisation {
                 SurfaceLinearisation::Phase2 => surface::step_general,
                 SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
@@ -403,6 +416,25 @@ pub fn run_with_options(
             );
             let sources: f64 = absorbed.per_element.iter().sum();
             let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
+            if let (Some(diagnostic), Some((thickness, density)), Some(&t1_post)) = (
+                meltout_diagnostic.as_mut(),
+                bottom_before,
+                column.node_temperature.get(1),
+            ) {
+                let source0 = absorbed.per_element.first().copied().unwrap_or(0.0);
+                let conductance = conductivity.of_density(density) / thickness;
+                diagnostic.push(
+                    t,
+                    column.elements.len(),
+                    thickness,
+                    density,
+                    source0,
+                    tsg,
+                    t1_post,
+                    conductance,
+                    qg0,
+                );
+            }
 
             // 5. Phase change and water.
             let water_before: Vec<f64> = column.elements.iter().map(Element::water_mass).collect();
@@ -518,6 +550,7 @@ pub fn run_with_options(
                         steps,
                         ledger,
                         density_events.clone(),
+                        meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
                     )),
                 });
             }
@@ -546,6 +579,7 @@ pub fn run_with_options(
                     steps,
                     ledger,
                     density_events.clone(),
+                    meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
                 )),
             });
         }
@@ -580,7 +614,14 @@ pub fn run_with_options(
             interval = Interval::default();
         }
     }
-    Ok(make_output(rows, pro_text, steps, ledger, density_events))
+    Ok(make_output(
+        rows,
+        pro_text,
+        steps,
+        ledger,
+        density_events,
+        meltout_diagnostic.map(MeltoutDiagnostic::into_text),
+    ))
 }
 
 fn history(e: &Element) -> History {

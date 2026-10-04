@@ -115,6 +115,9 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
     if let Some(events) = &out.density_events {
         std::fs::write(stem.with_extension("density-events.csv"), events)?;
     }
+    if let Some(diagnostic) = &out.meltout_diagnostic {
+        std::fs::write(stem.with_extension("meltout-diagnostic.csv"), diagnostic)?;
+    }
     Ok(())
 }
 

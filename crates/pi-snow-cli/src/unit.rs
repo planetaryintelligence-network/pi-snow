@@ -83,7 +83,7 @@ pub fn run_unit(ini_path: &Path, end: DateTime<Utc>, physics: &PhysicsOptions) -
     let out = match engine::run_with_options(&cfg, physics, &site, &forcing, sno.to_column(), end) {
         Ok(out) => out,
         Err(error) => {
-            if let RunError::NonFinite { partial, .. } = &error {
+            if let RunError::Crazy { partial, .. } | RunError::NonFinite { partial, .. } = &error {
                 write_output(&root, &cfg, partial)?;
             }
             return Err(error.into());

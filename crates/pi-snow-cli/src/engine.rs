@@ -60,12 +60,14 @@ const MIN_MEASUREMENT_HEIGHT: f64 = 0.5;
 pub enum RunError {
     #[error("forcing field {0} is missing")]
     MissingField(&'static str),
-    #[error("temperature {value} K at {time} is outside T_CRAZY [{min}, {max}]")]
+    #[error("temperature {value} K at node {node}, time {time} is outside T_CRAZY [{min}, {max}]")]
     Crazy {
+        node: usize,
         time: DateTime<Utc>,
         value: f64,
         min: f64,
         max: f64,
+        partial: Box<RunOutput>,
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
@@ -502,13 +504,21 @@ pub fn run_with_options(
             (b, absorbed.albedo, qg0)
         };
 
-        for &t_node in &column.node_temperature {
+        for (node, &t_node) in column.node_temperature.iter().enumerate() {
             if t_node < cfg.t_crazy_min || t_node > cfg.t_crazy_max {
                 return Err(RunError::Crazy {
+                    node,
                     time: t,
                     value: t_node,
                     min: cfg.t_crazy_min,
                     max: cfg.t_crazy_max,
+                    partial: Box::new(make_output(
+                        rows,
+                        pro_text,
+                        steps,
+                        ledger,
+                        density_events.clone(),
+                    )),
                 });
             }
         }

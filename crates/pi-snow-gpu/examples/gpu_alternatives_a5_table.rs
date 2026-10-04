@@ -227,7 +227,7 @@ fn main() -> Result<()> {
         "{{\n  \"plan_sha256\":\"{PLAN}\",\n  \"source_units\":{unit_count},\n  \"w_pixels\":{},\n  \"samples\":{},\n  \"skipped_wind_nonpositive\":{},\n  \"invalid_coordinate_fallbacks\":{},\n  \"first_invalid_coordinate\":{},\n  \"registered_frozen_refusals\":[{}],\n  \"unused_ri_ge_0.05_zero_slots\":{},\n  \"observed_ri\":[{},{}],\n  \"ri_bounds_padded\":[{},{}],\n  \"observed_z_wind_over_z0\":[{},{}],\n  \"z_wind_over_z0_bounds_padded\":[{},{}],\n  \"observed_z_scalar_over_z0\":[{},{}],\n  \"z_scalar_over_z0_bounds_padded\":[{},{}],\n  \"axis_sizes\":[{}, {}, {}],\n  \"ri_nodes\":[{}],\n  \"z_wind_over_z0_nodes\":[{}],\n  \"z_scalar_over_z0_nodes\":[{}],\n  \"payload\":\"f64 little-endian pairs dm,dh; RI-major, wind-ratio, scalar-ratio; zero placeholders for loop-only Ri_b >= 0.05 nodes\"\n}}\n",
         indices.len(), bounds.samples, bounds.skipped_wind,
         bounds.invalid_coordinates, bounds.first_invalid.as_ref().map_or("null".into(), |s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))),
-        bounds.frozen_refusals.iter().map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join(","),
+        bounds.frozen_refusals.iter().map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('\t', "\\t").replace('"', "\\\""))).collect::<Vec<_>>().join(","),
         unused_cliff_nodes,
         fmt(bounds.ri_min), fmt(bounds.ri_max), fmt(ri_lo), fmt(ri_hi),
         fmt(bounds.zw_min), fmt(bounds.zw_max), fmt(zw_lo), fmt(zw_hi),

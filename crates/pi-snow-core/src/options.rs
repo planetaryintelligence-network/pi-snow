@@ -133,6 +133,30 @@ pub enum SurfaceLinearisation {
     RadiativeFloor,
 }
 
+/// Fresh-snow density assigned to deposited solid precipitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FreshSnowDensity {
+    /// Phase 2 Pahaut/Vionnet form.
+    #[default]
+    Phase2,
+    /// Anderson (1976), reproduced by Lafaysse et al. (2026), Eq. 35.
+    A76Anderson1976,
+}
+
+/// Dry-layer viscosity selection for the density experiment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrySettlement {
+    /// Phase 2 BR92 viscosity for every layer.
+    #[default]
+    Br92,
+    /// Teufelsbauer's dry-snow form, with wet layers retained at BR92.
+    T11,
+    /// Kojima's dry dendritic form, with other layers retained at BR92.
+    K75,
+    /// K75 on dry dendritic layers and T11 on other dry layers.
+    T11K75,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
@@ -145,6 +169,8 @@ pub struct PhysicsOptions {
     pub wet_grain_growth: WetGrainGrowth,
     pub sublimation_melt_out: SublimationMeltOut,
     pub surface_linearisation: SurfaceLinearisation,
+    pub fresh_snow_density: FreshSnowDensity,
+    pub dry_settlement: DrySettlement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +261,22 @@ impl PhysicsOptions {
                 self.wet_grain_growth = match value {
                     "NONE" => WetGrainGrowth::None,
                     "BRUN1989" => WetGrainGrowth::Brun1989,
+                    _ => return Err(bad()),
+                }
+            }
+            "NEW_SNOW_DENSITY" => {
+                self.fresh_snow_density = match value {
+                    "PHASE2" => FreshSnowDensity::Phase2,
+                    "A76_ANDERSON1976" => FreshSnowDensity::A76Anderson1976,
+                    _ => return Err(bad()),
+                }
+            }
+            "DRY_SETTLEMENT" => {
+                self.dry_settlement = match value {
+                    "BR92" => DrySettlement::Br92,
+                    "T11" => DrySettlement::T11,
+                    "K75" => DrySettlement::K75,
+                    "T11_K75" => DrySettlement::T11K75,
                     _ => return Err(bad()),
                 }
             }

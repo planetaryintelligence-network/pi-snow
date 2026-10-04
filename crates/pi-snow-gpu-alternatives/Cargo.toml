@@ -13,5 +13,9 @@ anyhow.workspace = true
 chrono.workspace = true
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }
 
+[[bin]]
+name = "pi-snow-gpu-a5"
+path = "src/bin/pi-snow-gpu-a5.rs"
+
 [dev-dependencies]
 approx.workspace = true

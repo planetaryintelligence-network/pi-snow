@@ -154,9 +154,9 @@ fn run_hourly_inner(
         .iter()
         .map(|i| Constants::new(i.cfg, options, i.site))
         .collect();
-    let k = gpu::run_constants(inputs[0].cfg, &constants[0]);
+    let k = gpu::run_constants(inputs[0].cfg, &constants[0])?;
     for (i, c) in inputs.iter().zip(&constants) {
-        if gpu::run_constants(i.cfg, c).map(f64::to_bits) != k.map(f64::to_bits) {
+        if gpu::run_constants(i.cfg, c)?.map(f64::to_bits) != k.map(f64::to_bits) {
             bail!("columns of one batch must share run constants ({})", i.site.station_id);
         }
         gpu::check_supported(i.cfg, c, &i.start)?;

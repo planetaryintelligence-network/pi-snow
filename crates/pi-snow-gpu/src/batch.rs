@@ -252,7 +252,8 @@ pub fn run(
     // One GPU batch per distinct set of run constants.
     let mut groups: Vec<([u64; gpu::K_COUNT], Vec<usize>)> = Vec::new();
     for (pos, (i, u, _)) in loaded.iter().enumerate() {
-        let k = gpu::run_constants(&u.cfg, &Constants::new(&u.cfg, &options, &u.site)).map(f64::to_bits);
+        let k = gpu::run_constants(&u.cfg, &Constants::new(&u.cfg, &options, &u.site))?
+            .map(f64::to_bits);
         match groups.iter_mut().find(|(g, _)| *g == k) {
             Some((_, members)) => members.push(pos),
             None => groups.push((k, vec![pos])),

@@ -92,7 +92,7 @@ pub fn run(gpu: &Gpu, args: &GridArgs) -> Result<()> {
         let sites = chosen.iter().map(|p| p.site()).collect::<Result<Vec<_>>>()?;
         let b = chosen.len();
         let constants: Vec<Constants> = sites.iter().map(|s| Constants::new(&cfg, &options, s)).collect();
-        let k = gpu::run_constants(&cfg, &constants[0]);
+        let k = gpu::run_constants(&cfg, &constants[0])?;
         let mut par = vec![0.0; gpu::P_COUNT * b];
         for (c, (s, cs)) in sites.iter().zip(&constants).enumerate() {
             for (p, x) in gpu::column_params(s, cs).iter().enumerate() {

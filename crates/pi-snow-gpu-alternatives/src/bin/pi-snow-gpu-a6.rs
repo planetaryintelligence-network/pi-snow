@@ -39,8 +39,13 @@ fn main() -> Result<()> {
             let keys_path = PathBuf::from(args.next().context("KEYS_FILE")?);
             let out = PathBuf::from(args.next().context("OUT_DIR")?);
             if args.next().is_some() { bail!("too many arguments"); }
-            if out.exists() { bail!("refusing to overwrite {}", out.display()); }
-            fs::create_dir_all(&out)?;
+            if out.exists() {
+                if !out.is_dir() || fs::read_dir(&out)?.next().is_some() {
+                    bail!("refusing to overwrite non-empty output {}", out.display());
+                }
+            } else {
+                fs::create_dir_all(&out)?;
+            }
             let template = fs::read_to_string(template_path)?;
             let pixels = forcing::read_pixels(&pixels_path)?;
             let keys: Vec<_> = fs::read_to_string(keys_path)?.lines().map(str::trim)

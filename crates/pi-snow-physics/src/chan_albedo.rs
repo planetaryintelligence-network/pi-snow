@@ -332,13 +332,14 @@ pub fn clean_snow_albedo(radius_um: f64) -> f64 {
 pub fn visible_albedo(hs_m: f64, radius_um: f64, bc_ng_g: f64, dust_ng_g: f64) -> (f64, Branch) {
     let ceqv = equivalent_bc_concentration(bc_ng_g, dust_ng_g);
     let radius = effective_radius(radius_um);
+    // Chan p. 7 Eq. 17 uses physical r; angle-corrected R belongs to Eq. 10.
     if ceqv < 500.0 && hs_m <= 0.04 {
-        return (malinka(hs_m, ceqv, radius), Branch::Malinka);
+        return (malinka(hs_m, ceqv, radius_um), Branch::Malinka);
     }
     if (ceqv >= 7_500.0 && radius_um >= 900.0)
         || (ceqv >= 10_000.0 && (500.0..900.0).contains(&radius_um))
     {
-        return (rozenberg(hs_m, ceqv, radius), Branch::Rozenberg);
+        return (rozenberg(hs_m, ceqv, radius_um), Branch::Rozenberg);
     }
     let log_r = radius.log10();
     let clean = 0.980_508 - 0.013_610_4 * log_r - 0.019_541_6 * log_r * log_r;
@@ -379,9 +380,9 @@ fn malinka(hs_m: f64, ceqv: f64, radius_um: f64) -> f64 {
         .clamp(0.0, 1.0)
 }
 
-fn rozenberg(hs_m: f64, ceqv: f64, radius: f64) -> f64 {
-    let tau = optical_depth(hs_m, ceqv, radius * 100.0);
-    let omega0 = single_scattering_albedo(ceqv, radius * 100.0);
+fn rozenberg(hs_m: f64, ceqv: f64, radius_um: f64) -> f64 {
+    let tau = optical_depth(hs_m, ceqv, radius_um);
+    let omega0 = single_scattering_albedo(ceqv, radius_um);
     let gamma = (3.0 * (1.0 - omega0) * (1.0 - omega0 * G)).sqrt();
     let y = (4.0 * (1.0 - omega0) / (3.0 * (1.0 - omega0 * G))).sqrt();
     let denom = (gamma * tau + y).sinh();
@@ -393,8 +394,9 @@ fn rozenberg(hs_m: f64, ceqv: f64, radius: f64) -> f64 {
 fn optical_depth(hs_m: f64, ceqv: f64, radius_um: f64) -> f64 {
     let radius_m = radius_um * 1e-6;
     let x = REAL_REFRACTIVE_INDEX_ICE.powi(2) * radius_m * SIGMA_ABS_ICE * RHO_ICE;
-    let omega_ice = 1.0 - x * T_DIFF / (x + T_DIFF);
-    let sigma_ext_ice = SIGMA_ABS_ICE / (1.0 - omega_ice);
+    // Eq. 17 directly: subtracting omega from 1 loses precision for clean ice.
+    let one_minus_omega = x * T_DIFF / (x + T_DIFF);
+    let sigma_ext_ice = SIGMA_ABS_ICE / one_minus_omega;
     let sigma_ext_total = sigma_ext_ice + ceqv * 1e-9 * SIGMA_EXT_BC;
     hs_m.max(0.0) * sigma_ext_total * RHO_SNOW
 }
@@ -402,8 +404,9 @@ fn optical_depth(hs_m: f64, ceqv: f64, radius_um: f64) -> f64 {
 fn single_scattering_albedo(ceqv: f64, radius_um: f64) -> f64 {
     let radius_m = radius_um * 1e-6;
     let x = REAL_REFRACTIVE_INDEX_ICE.powi(2) * radius_m * SIGMA_ABS_ICE * RHO_ICE;
-    let omega_ice = 1.0 - x * T_DIFF / (x + T_DIFF);
-    let sigma_ext_ice = SIGMA_ABS_ICE / (1.0 - omega_ice);
+    let one_minus_omega = x * T_DIFF / (x + T_DIFF);
+    let omega_ice = 1.0 - one_minus_omega;
+    let sigma_ext_ice = SIGMA_ABS_ICE / one_minus_omega;
     let impurity = ceqv * 1e-9;
     let ext_bc = impurity * SIGMA_EXT_BC;
     (sigma_ext_ice * omega_ice + ext_bc * OMEGA_BC) / (sigma_ext_ice + ext_bc).max(1e-30)
@@ -420,6 +423,46 @@ mod tests {
             assert_eq!(branch, Branch::He);
             assert!((albedo - expected).abs() < 0.001, "{radius}: {albedo}");
             assert!((albedo - clean_snow_albedo(radius)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn malinka_entry_conditions_have_finite_albedo() {
+        for depth in [1e-4, 0.005, 0.04] {
+            for radius in [50.0, 100.0, 500.0, 1_150.0] {
+                for concentration in [0.0, 100.0, 499.0] {
+                    let (albedo, branch) = visible_albedo(depth, radius, concentration, 0.0);
+                    assert_eq!(branch, Branch::Malinka);
+                    assert!(
+                        albedo.is_finite() && (0.0..=1.0).contains(&albedo),
+                        "depth={depth}, radius={radius}, concentration={concentration}: {albedo}"
+                    );
+                }
+            }
+        }
+        // Chan p. 7 Eqs. 11, 13, 17-18; raw r=50 µm, D=0, theta=48.19°.
+        let (albedo, _) = visible_albedo(0.005, 50.0, 0.0, 0.0);
+        assert!((albedo - 0.825_911_795_281_279_9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rozenberg_entry_conditions_have_finite_albedo() {
+        for depth in [1e-4, 0.005, 0.04, 0.20, 1.0, 2.0] {
+            for (radius, concentrations) in [
+                (500.0, [10_000.0, 20_000.0]),
+                (899.0, [10_000.0, 20_000.0]),
+                (900.0, [7_500.0, 20_000.0]),
+                (1_150.0, [7_500.0, 20_000.0]),
+            ] {
+                for concentration in concentrations {
+                    let (albedo, branch) = visible_albedo(depth, radius, concentration, 0.0);
+                    assert_eq!(branch, Branch::Rozenberg);
+                    assert!(
+                        albedo.is_finite() && (0.0..=1.0).contains(&albedo),
+                        "depth={depth}, radius={radius}, concentration={concentration}: {albedo}"
+                    );
+                }
+            }
         }
     }
 

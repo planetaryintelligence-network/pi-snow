@@ -47,6 +47,7 @@ use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
 use pi_snow_physics::wet_growth;
 
+use crate::dirichlet_storage_diagnostic::DirichletStorageDiagnostic;
 use crate::ledger::{Interval, Ledger};
 use crate::meltout_diagnostic::MeltoutDiagnostic;
 
@@ -110,6 +111,8 @@ pub struct RunOutput {
     /// Dirichlet lower-boundary reconstruction, enabled by
     /// `PI_SNOW_MELTOUT_DIAGNOSTICS=1`.
     pub meltout_diagnostic: Option<String>,
+    /// Pinned-node storage accounting for the amended A4 control proof.
+    pub dirichlet_storage_diagnostic: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -229,29 +232,35 @@ pub fn run_with_options(
     let mut meltout_diagnostic = std::env::var_os("PI_SNOW_MELTOUT_DIAGNOSTICS")
         .is_some_and(|value| value == "1")
         .then(MeltoutDiagnostic::new);
-    let make_output = |rows: Vec<OutputRow>,
-                       pro_text: String,
-                       steps: usize,
-                       ledger: Option<Ledger>,
-                       density_events: Option<String>,
-                       meltout_diagnostic: Option<String>| RunOutput {
-        smet: pi_snow_io::smet::write_output_smet_with_acdd(
-            &site.station_id,
-            &site.station_name,
-            site.latitude,
-            site.longitude,
-            site.altitude,
-            site.slope_angle,
-            site.slope_azimuth,
-            &rows,
-            cfg.acdd_write,
-        ),
-        pro: pro_text,
-        steps,
-        mass: ledger.map(Ledger::into_text),
-        density_events,
-        meltout_diagnostic,
-    };
+    let mut dirichlet_storage_diagnostic = std::env::var_os("PI_SNOW_MELTOUT_DIAGNOSTICS")
+        .is_some_and(|value| value == "1")
+        .then(DirichletStorageDiagnostic::new);
+    let make_output =
+        |rows: Vec<OutputRow>,
+         pro_text: String,
+         steps: usize,
+         ledger: Option<Ledger>,
+         density_events: Option<String>,
+         meltout_diagnostic: Option<String>,
+         dirichlet_storage_diagnostic: Option<String>| RunOutput {
+            smet: pi_snow_io::smet::write_output_smet_with_acdd(
+                &site.station_id,
+                &site.station_name,
+                site.latitude,
+                site.longitude,
+                site.altitude,
+                site.slope_angle,
+                site.slope_azimuth,
+                &rows,
+                cfg.acdd_write,
+            ),
+            pro: pro_text,
+            steps,
+            mass: ledger.map(Ledger::into_text),
+            density_events,
+            meltout_diagnostic,
+            dirichlet_storage_diagnostic,
+        };
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -397,10 +406,14 @@ pub fn run_with_options(
             };
             // 4. Energy balance and conduction.
             let before = thermal::internal_energy(&column);
-            let bottom_before = column
-                .elements
-                .first()
-                .map(|bottom| (bottom.thickness, bottom.density()));
+            let t0_pre = column.node_temperature[0];
+            let bottom_before = column.elements.first().map(|bottom| {
+                (
+                    bottom.thickness,
+                    bottom.density(),
+                    0.5 * thermal::volumetric_heat_capacity(bottom) * bottom.thickness,
+                )
+            });
             let step_surface = match options.surface_linearisation {
                 SurfaceLinearisation::Phase2 => surface::step_general,
                 SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
@@ -416,7 +429,7 @@ pub fn run_with_options(
             );
             let sources: f64 = absorbed.per_element.iter().sum();
             let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
-            if let (Some(diagnostic), Some((thickness, density)), Some(&t1_post)) = (
+            if let (Some(diagnostic), Some((thickness, density, _)), Some(&t1_post)) = (
                 meltout_diagnostic.as_mut(),
                 bottom_before,
                 column.node_temperature.get(1),
@@ -432,6 +445,31 @@ pub fn run_with_options(
                     tsg,
                     t1_post,
                     conductance,
+                    qg0,
+                );
+            }
+            if let (
+                Some(diagnostic),
+                Some((thickness, density, c0)),
+                Some(&t1_post),
+                Some(&t0_post),
+            ) = (
+                dirichlet_storage_diagnostic.as_mut(),
+                bottom_before,
+                column.node_temperature.get(1),
+                column.node_temperature.first(),
+            ) {
+                let source0 = absorbed.per_element.first().copied().unwrap_or(0.0);
+                let conductance0 = conductivity.of_density(density) / thickness;
+                diagnostic.push(
+                    t,
+                    t0_pre,
+                    t0_post,
+                    c0,
+                    dt,
+                    conductance0,
+                    t1_post,
+                    source0,
                     qg0,
                 );
             }
@@ -551,6 +589,9 @@ pub fn run_with_options(
                         ledger,
                         density_events.clone(),
                         meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
+                        dirichlet_storage_diagnostic
+                            .as_ref()
+                            .map(|d| d.clone().into_text()),
                     )),
                 });
             }
@@ -580,6 +621,9 @@ pub fn run_with_options(
                     ledger,
                     density_events.clone(),
                     meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
+                    dirichlet_storage_diagnostic
+                        .as_ref()
+                        .map(|d| d.clone().into_text()),
                 )),
             });
         }
@@ -621,6 +665,7 @@ pub fn run_with_options(
         ledger,
         density_events,
         meltout_diagnostic.map(MeltoutDiagnostic::into_text),
+        dirichlet_storage_diagnostic.map(DirichletStorageDiagnostic::into_text),
     ))
 }
 

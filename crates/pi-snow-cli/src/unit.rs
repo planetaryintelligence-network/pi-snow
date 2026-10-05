@@ -118,6 +118,12 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
     if let Some(diagnostic) = &out.meltout_diagnostic {
         std::fs::write(stem.with_extension("meltout-diagnostic.csv"), diagnostic)?;
     }
+    if let Some(diagnostic) = &out.dirichlet_storage_diagnostic {
+        std::fs::write(
+            stem.with_extension("dirichlet-storage-diagnostic.csv"),
+            diagnostic,
+        )?;
+    }
     Ok(())
 }
 

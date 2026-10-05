@@ -491,10 +491,16 @@ pub fn run_with_options(
             } else {
                 0.0
             };
+            let available_melt_energy = b.total + sources + discrete_flux;
+            let energy_criterion = meltout_candidate::decide(pack_before, available_melt_energy, dt);
             let decision = if options.total_melt == TotalMelt::CrocusEq116 {
-                meltout_candidate::decide(pack_before, b.total + sources + discrete_flux, dt)
+                energy_criterion
             } else {
-                Default::default()
+                meltout_candidate::TotalMeltDecision {
+                    available_j_m2: energy_criterion.available_j_m2,
+                    requirement_j_m2: energy_criterion.requirement_j_m2,
+                    ..Default::default()
+                }
             };
             let mut total_melt_removed = (0.0, 0.0);
             if decision.fired {
@@ -659,7 +665,7 @@ pub fn run_with_options(
                 let energy_residual = meltout_candidate::energy_residual(
                     pack_before,
                     pack_after,
-                    b.total + sources + discrete_flux,
+                    available_melt_energy,
                     ground_reset_storage,
                     snow_runoff,
                     deposited_vapour - sublimated,

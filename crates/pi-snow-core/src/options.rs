@@ -133,6 +133,16 @@ pub enum SurfaceLinearisation {
     RadiativeFloor,
 }
 
+/// Optional pre-solve merge of a thin top snow element (engine-cold-crash-v1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinTopMerge {
+    /// Phase 2 element ordering, unchanged.
+    #[default]
+    Phase2,
+    /// Merge one top snow element thinner than 10 mm into the element below.
+    Clm4_010Mm,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
@@ -145,6 +155,7 @@ pub struct PhysicsOptions {
     pub wet_grain_growth: WetGrainGrowth,
     pub sublimation_melt_out: SublimationMeltOut,
     pub surface_linearisation: SurfaceLinearisation,
+    pub thin_top_merge: ThinTopMerge,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +246,13 @@ impl PhysicsOptions {
                 self.wet_grain_growth = match value {
                     "NONE" => WetGrainGrowth::None,
                     "BRUN1989" => WetGrainGrowth::Brun1989,
+                    _ => return Err(bad()),
+                }
+            }
+            "THIN_TOP_MERGE" => {
+                self.thin_top_merge = match value {
+                    "PHASE2" => ThinTopMerge::Phase2,
+                    "CLM4_010MM" => ThinTopMerge::Clm4_010Mm,
                     _ => return Err(bad()),
                 }
             }

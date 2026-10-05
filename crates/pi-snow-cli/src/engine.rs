@@ -41,6 +41,7 @@ use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
 use pi_snow_physics::surface_diagnostic;
 use pi_snow_physics::surface_numerics;
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
+use pi_snow_physics::thin_top_merge;
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
 use pi_snow_physics::wet_growth;
@@ -328,6 +329,10 @@ pub fn run_with_diagnostics(
                 acc.runoff += liquid;
                 interval.rain_to_ground += liquid;
             }
+        }
+
+        if options.thin_top_merge == pi_snow_core::options::ThinTopMerge::Clm4_010Mm {
+            thin_top_merge::merge_top_once(&mut column, 0.010);
         }
 
         let mut trace_pre_thickness = Vec::new();

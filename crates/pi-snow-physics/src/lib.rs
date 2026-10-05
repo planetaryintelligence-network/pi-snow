@@ -22,6 +22,7 @@ pub mod surface_diagnostic;
 pub mod surface_layer;
 pub mod surface_numerics;
 pub mod thermal;
+pub mod thin_top_merge;
 pub mod turbulence;
 pub mod water;
 pub mod wet_growth;

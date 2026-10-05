@@ -23,3 +23,7 @@ path = "src/bin/pi-snow-gpu-a1a2.rs"
 
 [dev-dependencies]
 approx.workspace = true
+
+[[bin]]
+name = "pi-snow-gpu-a6"
+path = "src/bin/pi-snow-gpu-a6.rs"

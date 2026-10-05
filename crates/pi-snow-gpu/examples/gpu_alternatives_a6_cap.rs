@@ -275,10 +275,12 @@ fn main() -> Result<()> {
     let forcing_dir = Path::new(&args[1]);
     let template = read_to_string(&args[2])?;
     let pixels = forcing::read_pixels(Path::new(&args[3]))?;
-    let keys: Vec<_> = read_to_string(&args[4])?
+    let key_list = read_to_string(&args[4])?;
+    let keys: Vec<_> = key_list
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
         .collect();
     let out = Path::new(&args[5]);
     std::fs::create_dir_all(out)?;

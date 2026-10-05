@@ -61,7 +61,7 @@ fn load_inputs(v: &std::collections::BTreeMap<String, String>) -> Result<(Vec<fo
 
 fn preflight(v: &std::collections::BTreeMap<String, String>) -> Result<()> {
     let (_, hourly, packed) = load_inputs(v)?;
-    let result = packed_result(&hourly, &packed, None, None, None)
+    let result = packed_result(&hourly, &packed, None, None, None, None)
         .replacen("\"state\":\"scored\"", "\"state\":\"packing-preflight\"", 1);
     std::fs::write(PathBuf::from(arg(v, "--out")), result.as_bytes())?;
     println!("{}", result.trim());
@@ -75,7 +75,7 @@ fn g1c(v: &std::collections::BTreeMap<String, String>) -> Result<()> {
     let n_rows = rows[0].len();
     if rows.iter().any(|r| r.len() != n_rows) { bail!("G1c pixels have unequal expanded row counts"); }
     let tex = gpu.probe_rows(n_rows, rows.len())?;
-    let forcing_result = packed_result(&hourly, &packed, Some(&rows), Some(&tex), None);
+    let forcing_result = packed_result(&hourly, &packed, Some(&rows), Some(&tex), None, Some(gpu.device_limits));
     let gate_pass = forcing_result.contains("\"g1c_forcing_pass\":true");
     let summaries = if gate_pass {
         let template = std::fs::read_to_string(arg(v, "--ini"))?;
@@ -99,7 +99,7 @@ fn g1c(v: &std::collections::BTreeMap<String, String>) -> Result<()> {
         }).collect();
         Some(runner::run_hourly_streaming(&gpu.gpu, &inputs, NMAX, &options, &targets)?)
     } else { None };
-    let text = packed_result(&hourly, &packed, Some(&rows), Some(&tex), summaries.as_deref());
+    let text = packed_result(&hourly, &packed, Some(&rows), Some(&tex), summaries.as_deref(), Some(gpu.device_limits));
     std::fs::write(PathBuf::from(arg(v, "--out")), text.as_bytes())?;
     println!("{}", text.trim());
     Ok(())
@@ -107,7 +107,8 @@ fn g1c(v: &std::collections::BTreeMap<String, String>) -> Result<()> {
 
 fn packed_result(hourly: &[Hourly], packed: &PackedForcing,
                  rows: Option<&[Vec<ForcingRow>]>, tex: Option<&[f32]>,
-                 summaries: Option<&[runner::ColumnSummary]>) -> String {
+                 summaries: Option<&[runner::ColumnSummary]>,
+                 limits: Option<forcing_texture::TextureDeviceLimits>) -> String {
     let mut fields = String::new();
     let mut all_pass = false;
     if let (Some(rows), Some(tex)) = (rows, tex) {
@@ -154,8 +155,12 @@ fn packed_result(hourly: &[Hourly], packed: &PackedForcing,
         x.steps, x.max_elements, x.failure.is_some(), x.daily.len())).collect::<Vec<_>>().join(","));
     let physics_json = physics.unwrap_or_default();
     let dispatched = summaries.is_some();
-    format!("{{\"arm\":\"3.2 forcing-int16-texture\",\"state\":\"scored\",\"columns\":{},\"hours\":{},\"g1c_forcing_pass\":{},\"fields\":{{{}}},\"packing_max_abs_error\":{{{}}},\"hourly_texture_bytes\":{},\"psum\":{{\"kept_out_of_texture\":true,\"host_six_way_sum_max_abs_error\":{}}},\"physics_dispatched\":{},\"physics_dispatch\":\"{}\",\"physics_columns\":[{}],\"registered_bound\":\"abs(tex-exact) <= abs(v[h+1]-v[h])/256 + packing_step[field]\"}}\n",
-        packed.columns, packed.hours, if tex.is_some() { all_pass.to_string() } else { "null".into() }, fields, packing,
+    let device_limits = limits.map(|x| format!("{{\"max_2d_width\":{},\"max_2d_height\":{},\"max_2d_layered_width\":{},\"max_2d_layered_height\":{},\"max_2d_layers\":{}}}", x.width_2d, x.height_2d, x.width_2d_layered, x.height_2d_layered, x.layers_2d)).unwrap_or_else(|| "null".into());
+    format!("{{\"arm\":\"3.2 forcing-int16-texture\",\"state\":\"scored\",\"columns\":{},\"hours\":{},\"texture_extent\":{{\"width_elements\":{},\"height_rows\":{},\"row_bytes\":{},\"source_pitch_bytes\":{}}},\"device_texture_limits\":{},\"texture_extent_check\":{},\"g1c_forcing_pass\":{},\"fields\":{{{}}},\"packing_max_abs_error\":{{{}}},\"hourly_texture_bytes\":{},\"psum\":{{\"kept_out_of_texture\":true,\"host_six_way_sum_max_abs_error\":{}}},\"physics_dispatched\":{},\"physics_dispatch\":\"{}\",\"physics_columns\":[{}],\"registered_bound\":\"abs(tex-exact) <= abs(v[h+1]-v[h])/256 + packing_step[field]\"}}\n",
+        packed.columns, packed.hours, packed.columns, packed.hours,
+        packed.columns * std::mem::size_of::<i16>(), (packed.columns * std::mem::size_of::<i16>() + 3) & !3,
+        device_limits, if limits.is_some() { "passed" } else { "pending device query" },
+        if tex.is_some() { all_pass.to_string() } else { "null".into() }, fields, packing,
         packed.fields.iter().map(|x| x.len()*2).sum::<usize>(), psum_error, dispatched,
         if dispatched { "pi_snow_advance with FT32 hourly textures" } else if tex.is_some() && !all_pass { "skipped after G1c forcing failure" } else { "pending" }, physics_json)
 }

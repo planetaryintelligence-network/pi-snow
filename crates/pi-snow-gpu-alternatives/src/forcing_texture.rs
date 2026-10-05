@@ -14,6 +14,15 @@ pub const FIELDS: [&str; 6] = ["TA", "RH", "VW", "DW", "ISWR", "ILWR"];
 pub const SCALE: [f64; 6] = [0.01, 0.0005, 0.01, 0.1, 0.1, 0.05];
 pub const OFFSET: [f64; 6] = [273.15, 0.5, 0.0, 0.0, 0.0, 0.0];
 
+#[derive(Clone, Copy)]
+pub struct TextureDeviceLimits {
+    pub width_2d: usize,
+    pub height_2d: usize,
+    pub width_2d_layered: usize,
+    pub height_2d_layered: usize,
+    pub layers_2d: usize,
+}
+
 pub fn compile_nvrtc() -> Result<String> {
     let options = vec![
         "--fmad=false".to_string(), "--prec-div=true".to_string(),
@@ -68,6 +77,7 @@ impl PackedForcing {
 pub struct TextureGpu {
     pub gpu: Gpu,
     pub probe: CudaFunction,
+    pub device_limits: TextureDeviceLimits,
     textures: Vec<cudarc::driver::sys::CUtexObject>,
     arrays: Vec<cudarc::driver::sys::CUarray>,
 }
@@ -75,9 +85,24 @@ pub struct TextureGpu {
 impl TextureGpu {
     pub fn new(packed: &PackedForcing) -> Result<Self> {
         let ctx = CudaContext::new(0).context("CUDA device 0")?;
+        let limits = query_texture_limits()?;
+        if packed.columns > limits.width_2d || packed.hours > limits.height_2d {
+            bail!("2D int16 texture extent {}x{} exceeds device limits {}x{}",
+                packed.columns, packed.hours, limits.width_2d, limits.height_2d);
+        }
+        let row_bytes = packed.columns.checked_mul(std::mem::size_of::<i16>())
+            .context("int16 texture row width overflow")?;
+        let src_pitch = row_bytes.checked_add(3).context("texture row pitch overflow")? & !3;
+        eprintln!("texture_device_preflight: extent={}x{} elements/rows, row_bytes={}, src_pitch_bytes={}, limits_2d={}x{}, limits_2d_layered={}x{}x{} (non-layered array)",
+            packed.columns, packed.hours, row_bytes, src_pitch, limits.width_2d, limits.height_2d,
+            limits.width_2d_layered, limits.height_2d_layered, limits.layers_2d);
+        let pitch_elements = src_pitch / std::mem::size_of::<i16>();
+        let staging_elements = packed.hours.checked_mul(pitch_elements)
+            .context("pitched texture staging size overflow")?;
+        let mut pitched = vec![0i16; staging_elements];
         let mut arrays = Vec::with_capacity(6);
         let mut textures = Vec::with_capacity(6);
-        for payload in &packed.fields {
+        for (field, payload) in packed.fields.iter().enumerate() {
             let desc = cudarc::driver::sys::CUDA_ARRAY_DESCRIPTOR {
                 Width: packed.columns,
                 Height: packed.hours,
@@ -89,20 +114,27 @@ impl TextureGpu {
             let status = unsafe { cudarc::driver::sys::cuArrayCreate_v2(&mut array, &desc) };
             check_driver(status, "cuArrayCreate")?;
             for hour in 0..packed.hours {
-                let row = &payload[hour * packed.columns..(hour + 1) * packed.columns];
-                // SAFETY: row is live for this synchronous copy and exactly one array row.
-                let status = unsafe {
-                    cudarc::driver::sys::cuMemcpyHtoA_v2(
-                        array,
-                        hour * packed.columns * std::mem::size_of::<i16>(),
-                        row.as_ptr().cast(),
-                        row.len() * std::mem::size_of::<i16>(),
-                    )
-                };
-                if let Err(e) = check_driver(status, "cuMemcpyHtoA") {
-                    unsafe { cudarc::driver::sys::cuArrayDestroy(array); }
-                    return Err(e);
-                }
+                pitched[hour * pitch_elements..hour * pitch_elements + packed.columns]
+                    .copy_from_slice(&payload[hour * packed.columns..(hour + 1) * packed.columns]);
+            }
+            let copy = cudarc::driver::sys::CUDA_MEMCPY2D {
+                srcXInBytes: 0, srcY: 0,
+                srcMemoryType: cudarc::driver::sys::CUmemorytype_enum::CU_MEMORYTYPE_HOST,
+                srcHost: pitched.as_ptr().cast(), srcDevice: 0, srcArray: std::ptr::null_mut(),
+                srcPitch: src_pitch,
+                dstXInBytes: 0, dstY: 0,
+                dstMemoryType: cudarc::driver::sys::CUmemorytype_enum::CU_MEMORYTYPE_ARRAY,
+                dstHost: std::ptr::null_mut(), dstDevice: 0, dstArray: array, dstPitch: 0,
+                WidthInBytes: row_bytes, Height: packed.hours,
+            };
+            // SAFETY: pitched contains `hours` host rows, and the destination is a
+            // matching 2D array; width is bytes while descriptor width is elements.
+            let status = unsafe { cudarc::driver::sys::cuMemcpy2D_v2(&copy) };
+            if let Err(e) = check_driver(status, &format!(
+                "cuMemcpy2D field {} (width={} bytes, src_pitch={} bytes, height={})",
+                FIELDS[field], row_bytes, src_pitch, packed.hours)) {
+                unsafe { cudarc::driver::sys::cuArrayDestroy(array); }
+                return Err(e);
             }
             let mut resource = cudarc::driver::sys::CUDA_RESOURCE_DESC {
                 resType: cudarc::driver::sys::CUresourcetype_enum::CU_RESOURCE_TYPE_ARRAY,
@@ -178,7 +210,7 @@ impl TextureGpu {
                 build: Build { precision: Precision::F64, nvrtc_version: (major, minor),
                     driver_version, arch, options, source_sha256: sha256_hex(KERNEL_SOURCE.as_bytes()), ptx_sha256 },
             },
-            probe, textures, arrays,
+            probe, device_limits: limits, textures, arrays,
         })
     }
 
@@ -215,6 +247,24 @@ fn upload_global<T: cudarc::driver::DeviceRepr + Copy>(module: &Arc<cudarc::driv
 fn check_driver(status: cudarc::driver::sys::CUresult, what: &str) -> Result<()> {
     if status == cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS { Ok(()) }
     else { bail!("{what} failed with CUDA driver result {status:?}") }
+}
+
+fn query_texture_limits() -> Result<TextureDeviceLimits> {
+    use cudarc::driver::sys::CUdevice_attribute_enum as Attr;
+    unsafe fn attr(attribute: cudarc::driver::sys::CUdevice_attribute) -> Result<usize> {
+        let mut value = 0;
+        // SAFETY: value is a writable out-parameter and device ordinal 0 is initialized.
+        let status = unsafe { cudarc::driver::sys::cuDeviceGetAttribute(&mut value, attribute, 0) };
+        check_driver(status, "cuDeviceGetAttribute")?;
+        usize::try_from(value).context("negative CUDA texture limit")
+    }
+    Ok(TextureDeviceLimits {
+        width_2d: unsafe { attr(Attr::CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE2D_WIDTH)? },
+        height_2d: unsafe { attr(Attr::CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE2D_HEIGHT)? },
+        width_2d_layered: unsafe { attr(Attr::CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE2D_LAYERED_WIDTH)? },
+        height_2d_layered: unsafe { attr(Attr::CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE2D_LAYERED_HEIGHT)? },
+        layers_2d: unsafe { attr(Attr::CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE2D_LAYERED_LAYERS)? },
+    })
 }
 
 fn cleanup(textures: &[cudarc::driver::sys::CUtexObject], arrays: &[cudarc::driver::sys::CUarray]) {

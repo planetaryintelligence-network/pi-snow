@@ -124,6 +124,12 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
             diagnostic,
         )?;
     }
+    if let Some(diagnostic) = &out.meltout_candidate_diagnostic {
+        std::fs::write(
+            stem.with_extension("meltout-candidate-diagnostic.csv"),
+            diagnostic,
+        )?;
+    }
     Ok(())
 }
 

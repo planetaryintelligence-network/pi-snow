@@ -19,10 +19,11 @@
 //! Nothing here is physics: it wires modules that each carry their own sources.
 
 use chrono::{DateTime, Duration, Timelike, Utc};
-use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
+use pi_snow_core::constants::{LH_FUSION, NODATA, RHO_WATER, T_MELT};
 use pi_snow_core::options::{
-    DrySettlement, FreshSnowDensity, GrainClassification, MassReport, S5Index, SnowAlbedo,
-    SublimationMeltOut, SurfaceLayer, SurfaceLinearisation, Turbulence, WetGrainGrowth,
+    DrySettlement, FreshSnowDensity, GrainClassification, GroundBoundary, MassReport, S5Index,
+    SnowAlbedo, SublimationMeltOut, SurfaceLayer, SurfaceLinearisation, TotalMelt, Turbulence,
+    WetGrainGrowth,
 };
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
@@ -49,6 +50,7 @@ use pi_snow_physics::wet_growth;
 
 use crate::dirichlet_storage_diagnostic::DirichletStorageDiagnostic;
 use crate::ledger::{Interval, Ledger};
+use crate::meltout_candidate::{self, MeltoutCandidateDiagnostic, PackState};
 use crate::meltout_diagnostic::MeltoutDiagnostic;
 
 /// Marker bits kept in `Microstructure::marker`.
@@ -113,6 +115,8 @@ pub struct RunOutput {
     pub meltout_diagnostic: Option<String>,
     /// Pinned-node storage accounting for the amended A4 control proof.
     pub dirichlet_storage_diagnostic: Option<String>,
+    /// Full candidate physics ledger, enabled only in registered diagnostic runs.
+    pub meltout_candidate_diagnostic: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -235,6 +239,10 @@ pub fn run_with_options(
     let mut dirichlet_storage_diagnostic = std::env::var_os("PI_SNOW_MELTOUT_DIAGNOSTICS")
         .is_some_and(|value| value == "1")
         .then(DirichletStorageDiagnostic::new);
+    let mut meltout_candidate_diagnostic =
+        std::env::var_os("PI_SNOW_MELTOUT_CANDIDATE_DIAGNOSTICS")
+            .is_some_and(|value| value == "1")
+            .then(MeltoutCandidateDiagnostic::new);
     let make_output =
         |rows: Vec<OutputRow>,
          pro_text: String,
@@ -242,7 +250,8 @@ pub fn run_with_options(
          ledger: Option<Ledger>,
          density_events: Option<String>,
          meltout_diagnostic: Option<String>,
-         dirichlet_storage_diagnostic: Option<String>| RunOutput {
+         dirichlet_storage_diagnostic: Option<String>,
+         meltout_candidate_diagnostic: Option<String>| RunOutput {
             smet: pi_snow_io::smet::write_output_smet_with_acdd(
                 &site.station_id,
                 &site.station_name,
@@ -260,6 +269,7 @@ pub fn run_with_options(
             density_events,
             meltout_diagnostic,
             dirichlet_storage_diagnostic,
+            meltout_candidate_diagnostic,
         };
 
     for row in &forcing.rows {
@@ -275,6 +285,8 @@ pub fn run_with_options(
             continue;
         }
         steps += 1;
+        let step_mass_before = column.swe() + deposition.buffered() + column.surface_hoar_mass;
+        let interval_before = interval;
         let v = |i: usize| row.values[i];
         let (Some(ta), Some(rh), Some(vw), Some(iswr_h), Some(ilwr)) =
             (v(i_ta), v(i_rh), v(i_vw), v(i_iswr), v(i_ilwr))
@@ -406,6 +418,7 @@ pub fn run_with_options(
             };
             // 4. Energy balance and conduction.
             let before = thermal::internal_energy(&column);
+            let pack_before = PackState::capture(&column);
             let t0_pre = column.node_temperature[0];
             let bottom_before = column.elements.first().map(|bottom| {
                 (
@@ -414,27 +427,88 @@ pub fn run_with_options(
                     0.5 * thermal::volumetric_heat_capacity(bottom) * bottom.thickness,
                 )
             });
-            let step_surface = match options.surface_linearisation {
-                SurfaceLinearisation::Phase2 => surface::step_general,
-                SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
+            let ground = match options.ground_boundary {
+                GroundBoundary::Phase2 => Ground::Temperature(tsg),
+                GroundBoundary::GeoHeatFlux => Ground::Flux(cfg.geo_heat),
             };
-            let b = step_surface(
-                &mut column,
-                &atm,
-                &params,
-                Ground::Temperature(tsg),
-                &absorbed.per_element,
-                dt,
-                conductivity,
-            );
+            let record_linearisation = options.ground_boundary != GroundBoundary::Phase2
+                || options.total_melt != TotalMelt::Phase2
+                || meltout_candidate_diagnostic.is_some();
+            let (b, linear_a, linear_b, solved_surface_temperature) = if record_linearisation {
+                if options.surface_linearisation != SurfaceLinearisation::Phase2 {
+                    return Err(RunError::IncompatiblePhysics(
+                        "engine-meltout diagnostics require SURFACE_LINEARISATION=PHASE2",
+                    ));
+                }
+                let step = meltout_candidate::step_general_recorded(
+                    &mut column,
+                    &atm,
+                    &params,
+                    ground,
+                    &absorbed.per_element,
+                    dt,
+                    conductivity,
+                );
+                (step.budget, step.a, step.b, step.solved_surface_temperature)
+            } else {
+                let step_surface = match options.surface_linearisation {
+                    SurfaceLinearisation::Phase2 => surface::step_general,
+                    SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
+                };
+                let b = step_surface(
+                    &mut column,
+                    &atm,
+                    &params,
+                    ground,
+                    &absorbed.per_element,
+                    dt,
+                    conductivity,
+                );
+                let ts = column.node_temperature.last().copied().unwrap_or(tsg);
+                (b, f64::NAN, f64::NAN, ts)
+            };
             let sources: f64 = absorbed.per_element.iter().sum();
             let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
+            let thermal_residual =
+                (thermal::internal_energy(&column) - before) - (b.total + sources + qg0) * dt;
+            let nonlinear_surface =
+                surface::budget(&atm, &params, solved_surface_temperature).total;
+            let source0 = absorbed.per_element.first().copied().unwrap_or(0.0);
+            let half_source0 = 0.5 * source0;
+            let discrete_flux = match (
+                options.ground_boundary,
+                bottom_before,
+                column.node_temperature.get(1),
+            ) {
+                (GroundBoundary::Phase2, Some((thickness, density, _)), Some(&t1)) => {
+                    -(conductivity.of_density(density) / thickness * (t1 - tsg) + half_source0)
+                }
+                (GroundBoundary::GeoHeatFlux, _, _) => cfg.geo_heat,
+                _ => f64::NAN,
+            };
+            let ground_reset_storage = if options.ground_boundary == GroundBoundary::Phase2 {
+                bottom_before.map_or(0.0, |(_, _, c0)| c0 * (column.node_temperature[0] - t0_pre))
+            } else {
+                0.0
+            };
+            let decision = if options.total_melt == TotalMelt::CrocusEq116 {
+                meltout_candidate::decide(pack_before, b.total + sources + discrete_flux, dt)
+            } else {
+                Default::default()
+            };
+            let mut total_melt_removed = (0.0, 0.0);
+            if decision.fired {
+                total_melt_removed = meltout_candidate::clear_snow(&mut column);
+                let exported_water = total_melt_removed.0 + total_melt_removed.1;
+                acc.runoff += exported_water;
+                interval.runoff += exported_water;
+                column.node_temperature[0] = tsg;
+            }
             if let (Some(diagnostic), Some((thickness, density, _)), Some(&t1_post)) = (
                 meltout_diagnostic.as_mut(),
                 bottom_before,
                 column.node_temperature.get(1),
             ) {
-                let source0 = absorbed.per_element.first().copied().unwrap_or(0.0);
                 let conductance = conductivity.of_density(density) / thickness;
                 diagnostic.push(
                     t,
@@ -459,7 +533,6 @@ pub fn run_with_options(
                 column.node_temperature.get(1),
                 column.node_temperature.first(),
             ) {
-                let source0 = absorbed.per_element.first().copied().unwrap_or(0.0);
                 let conductance0 = conductivity.of_density(density) / thickness;
                 diagnostic.push(
                     t,
@@ -568,6 +641,75 @@ pub fn run_with_options(
 
             // 9. Merge thin elements; drop anything melted to nothing.
             new_snow::merge_thin_elements(&mut column, cfg.minimum_element_length);
+            if let Some(diagnostic) = meltout_candidate_diagnostic.as_mut() {
+                let end_mass = column.swe() + deposition.buffered() + column.surface_hoar_mass;
+                let step_runoff = (interval.runoff - interval_before.runoff)
+                    + (interval.drained - interval_before.drained)
+                    + (interval.rain_to_ground - interval_before.rain_to_ground);
+                let deposited_vapour =
+                    interval.deposition_applied - interval_before.deposition_applied;
+                let sublimated = interval.sublimation_applied - interval_before.sublimation_applied;
+                let mass_residual = end_mass
+                    - (step_mass_before + solid + liquid + deposited_vapour
+                        - sublimated
+                        - step_runoff);
+                let pack_after = PackState::capture(&column);
+                let snow_runoff = (interval.runoff - interval_before.runoff)
+                    + (interval.drained - interval_before.drained);
+                let energy_residual = meltout_candidate::energy_residual(
+                    pack_before,
+                    pack_after,
+                    b.total + sources + discrete_flux,
+                    ground_reset_storage,
+                    snow_runoff,
+                    deposited_vapour - sublimated,
+                    solved_surface_temperature,
+                    decision,
+                    dt,
+                );
+                diagnostic.push(
+                    t,
+                    match options.ground_boundary {
+                        GroundBoundary::Phase2 => "DIRICHLET",
+                        GroundBoundary::GeoHeatFlux => "GEO_HEAT_FLUX",
+                    },
+                    if options.ground_boundary == GroundBoundary::GeoHeatFlux {
+                        cfg.geo_heat
+                    } else {
+                        0.0
+                    },
+                    linear_a,
+                    linear_b,
+                    b.total,
+                    nonlinear_surface,
+                    absorbed.surface,
+                    absorbed.to_ground,
+                    b.olwr,
+                    b.lwr_net,
+                    b.sensible,
+                    b.latent,
+                    b.rain,
+                    source0,
+                    half_source0,
+                    discrete_flux,
+                    qg0,
+                    ground_reset_storage,
+                    pack_before,
+                    decision,
+                    total_melt_removed.0 + pc.melted,
+                    pc.refrozen,
+                    LH_FUSION * (total_melt_removed.0 + pc.melted - pc.refrozen),
+                    step_runoff,
+                    sublimated,
+                    step_mass_before,
+                    end_mass,
+                    mass_residual,
+                    energy_residual,
+                    thermal_residual,
+                    solved_surface_temperature,
+                    column.node_temperature.first().copied().unwrap_or(tsg),
+                );
+            }
             if options.snow_albedo == SnowAlbedo::Aoki2003TempRate && column.elements.is_empty() {
                 aoki_state.end_pack();
             }
@@ -590,6 +732,9 @@ pub fn run_with_options(
                         density_events.clone(),
                         meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
                         dirichlet_storage_diagnostic
+                            .as_ref()
+                            .map(|d| d.clone().into_text()),
+                        meltout_candidate_diagnostic
                             .as_ref()
                             .map(|d| d.clone().into_text()),
                     )),
@@ -622,6 +767,9 @@ pub fn run_with_options(
                     density_events.clone(),
                     meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
                     dirichlet_storage_diagnostic
+                        .as_ref()
+                        .map(|d| d.clone().into_text()),
+                    meltout_candidate_diagnostic
                         .as_ref()
                         .map(|d| d.clone().into_text()),
                 )),
@@ -666,6 +814,7 @@ pub fn run_with_options(
         density_events,
         meltout_diagnostic.map(MeltoutDiagnostic::into_text),
         dirichlet_storage_diagnostic.map(DirichletStorageDiagnostic::into_text),
+        meltout_candidate_diagnostic.map(MeltoutCandidateDiagnostic::into_text),
     ))
 }
 

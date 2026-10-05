@@ -133,6 +133,26 @@ pub enum SurfaceLinearisation {
     RadiativeFloor,
 }
 
+/// Lower boundary treatment registered by engine-meltout-v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroundBoundary {
+    /// Prescribed forcing temperature (Phase 2).
+    #[default]
+    Phase2,
+    /// Prescribed `GEO_HEAT` flux into snow, W m-2.
+    GeoHeatFlux,
+}
+
+/// Whole-pack melt trigger registered by engine-meltout-v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TotalMelt {
+    /// Layer phase change (Phase 2).
+    #[default]
+    Phase2,
+    /// Crocus v3.0.2 §2.4.15 Eq. 116 whole-pack energy condition.
+    CrocusEq116,
+}
+
 /// Fresh-snow density assigned to deposited solid precipitation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FreshSnowDensity {
@@ -169,6 +189,8 @@ pub struct PhysicsOptions {
     pub wet_grain_growth: WetGrainGrowth,
     pub sublimation_melt_out: SublimationMeltOut,
     pub surface_linearisation: SurfaceLinearisation,
+    pub ground_boundary: GroundBoundary,
+    pub total_melt: TotalMelt,
     pub fresh_snow_density: FreshSnowDensity,
     pub dry_settlement: DrySettlement,
 }
@@ -254,6 +276,20 @@ impl PhysicsOptions {
                 self.surface_linearisation = match value {
                     "PHASE2" => SurfaceLinearisation::Phase2,
                     "RADIATIVE_FLOOR" => SurfaceLinearisation::RadiativeFloor,
+                    _ => return Err(bad()),
+                }
+            }
+            "GROUND_BOUNDARY" => {
+                self.ground_boundary = match value {
+                    "PHASE2" => GroundBoundary::Phase2,
+                    "GEO_HEAT_FLUX" => GroundBoundary::GeoHeatFlux,
+                    _ => return Err(bad()),
+                }
+            }
+            "TOTAL_MELT" => {
+                self.total_melt = match value {
+                    "PHASE2" => TotalMelt::Phase2,
+                    "CROCUS_EQ116" => TotalMelt::CrocusEq116,
                     _ => return Err(bad()),
                 }
             }
@@ -381,6 +417,22 @@ mod tests {
             PhysicsOptions::from_settings(["TURBULENCE=FROM_INI"]).unwrap(),
             PhysicsOptions::default()
         );
+    }
+
+    #[test]
+    fn meltout_candidate_keys_parse_without_changing_other_options() {
+        let base = PhysicsOptions::default();
+        assert_eq!(
+            PhysicsOptions::from_settings(["GROUND_BOUNDARY=PHASE2", "TOTAL_MELT=PHASE2"]).unwrap(),
+            base
+        );
+        let flux = PhysicsOptions::from_settings(["GROUND_BOUNDARY=GEO_HEAT_FLUX"]).unwrap();
+        assert_eq!(flux.ground_boundary, GroundBoundary::GeoHeatFlux);
+        assert_eq!(flux.total_melt, TotalMelt::Phase2);
+        let melt = PhysicsOptions::from_settings(["TOTAL_MELT=CROCUS_EQ116"]).unwrap();
+        assert_eq!(melt.total_melt, TotalMelt::CrocusEq116);
+        assert!(PhysicsOptions::from_settings(["GROUND_BOUNDARY=FLUX"]).is_err());
+        assert!(PhysicsOptions::from_settings(["TOTAL_MELT=EQ116"]).is_err());
     }
 
     #[test]

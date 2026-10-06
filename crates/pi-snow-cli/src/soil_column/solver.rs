@@ -21,6 +21,8 @@ pub enum Bottom {
     Geothermal005,
     /// Unit-test conservation and analytic limits.
     Insulated,
+    /// Analytic half-space boundary, positive leaving, for unit tests only.
+    Flux(f64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +78,7 @@ fn residual(
         Bottom::Deep { temperature_k } => deep * (t[9] - temperature_k),
         Bottom::Geothermal005 => -0.05,
         Bottom::Insulated => 0.0,
+        Bottom::Flux(q) => q,
     };
     flux[0] += qtop;
     flux[9] -= qbottom;
@@ -161,6 +164,7 @@ fn coordinate_sweep(
                 }
                 Bottom::Geothermal005 => rhs += dt * 0.05,
                 Bottom::Insulated => {}
+                Bottom::Flux(q) => rhs -= dt * q,
             }
         }
         // Exact inverse of H + a*T(H), including the latent interval. This

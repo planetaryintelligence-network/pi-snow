@@ -37,7 +37,7 @@ use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
 use pi_snow_physics::settlement::{self, Br92, Viscosity};
 use pi_snow_physics::solar;
 use pi_snow_physics::stability::{self, GrainClass, Layer};
-use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
+use pi_snow_physics::surface::{self, Atmosphere, Budget, SurfaceParameters};
 use pi_snow_physics::surface_diagnostic;
 use pi_snow_physics::surface_numerics;
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
@@ -48,6 +48,8 @@ use pi_snow_physics::wet_growth;
 
 use crate::diagnostic::{Collector, DiagnosticMode, Refusal, RunDiagnostics, StepTrace};
 use crate::ledger::{Interval, Ledger};
+
+mod trace_substep;
 
 /// Marker bits kept in `Microstructure::marker`.
 const MARK_REFROZEN: u16 = 1;
@@ -335,6 +337,7 @@ pub fn run_with_diagnostics(
             thin_top_merge::merge_top_once(&mut column, 0.010);
         }
 
+        let mut trace_first_nonfinite_substep = None;
         let mut trace_pre_thickness = Vec::new();
         let mut trace_pre_grain_type = Vec::new();
         let mut trace_pre_density = Vec::new();
@@ -352,6 +355,7 @@ pub fn run_with_diagnostics(
             z0: cfg.roughness_length,
             scheme,
         };
+        let trace_budget: Budget;
 
         let (budget, albedo_now, qg0) = if column.elements.is_empty() {
             let atm = Atmosphere {
@@ -435,8 +439,17 @@ pub fn run_with_diagnostics(
                 trace_post_solve_nodes = column.node_temperature.clone();
                 trace_shortwave = atm.absorbed_shortwave;
             }
+            trace_budget = b;
             let sources: f64 = absorbed.per_element.iter().sum();
             let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "surface and conduction solve",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 5. Phase change and water.
             let water_before: Vec<f64> = column.elements.iter().map(Element::water_mass).collect();
@@ -453,6 +466,14 @@ pub fn run_with_diagnostics(
             acc.runoff += pc.drained + runoff;
             interval.drained += pc.drained;
             interval.runoff += runoff;
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "phase change and water",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 6. Sublimation or deposition on the top element.
             let vapour = b.vapour_mass * dt;
@@ -495,9 +516,25 @@ pub fn run_with_diagnostics(
                 }
             }
             acc.sublimation += (-vapour).max(0.0);
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "sublimation or deposition",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 7. Settlement.
             settlement::step(&mut column, dt, Br92);
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "settlement",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 8. Metamorphism and ageing.
             let temps = column.element_temperatures();
@@ -529,9 +566,25 @@ pub fn run_with_diagnostics(
                 );
                 e.age_days += dt / 86_400.0;
             }
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "metamorphism",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 9. Merge thin elements; drop anything melted to nothing.
             new_snow::merge_thin_elements(&mut column, cfg.minimum_element_length);
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "merge",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
             if options.snow_albedo == SnowAlbedo::Aoki2003TempRate && column.elements.is_empty() {
                 aoki_state.end_pack();
             }
@@ -556,54 +609,53 @@ pub fn run_with_diagnostics(
             if crazy.is_none() {
                 collector.observe_minimum(t, steps, &column.node_temperature);
             }
-            if let Some((min_node, min_k)) = current_min {
-                if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
-                    collector.observe_trace(StepTrace {
-                        step: steps,
-                        time: t,
-                        dt_seconds: dt,
-                        air_temperature_k: ta,
-                        relative_humidity: rh,
-                        wind_m_s: vw,
-                        incoming_shortwave_horizontal_w_m2: iswr,
-                        incoming_longwave_w_m2: ilwr,
-                        pressure_pa: pressure,
-                        ground_temperature_k: tsg,
-                        z_wind_m: params.z_wind,
-                        z_scalar_m: params.z_scalar,
-                        roughness_length_m: params.z0,
-                        min_node,
-                        min_node_k: min_k,
-                        snowfall_m: solid,
-                        rain_m: liquid,
-                        deposited_kg_m2: deposited,
-                        deposition_buffer_kg_m2: deposition.buffered(),
-                        shortwave_absorbed_w_m2: trace_shortwave,
-                        internal_sources_w_m2: trace_sources,
-                        budget: [
-                            budget.olwr,
-                            budget.lwr_net,
-                            budget.sensible,
-                            budget.latent,
-                            budget.rain,
-                            budget.vapour_mass,
-                            budget.total,
-                        ],
-                        inferred_ground_flux_w_m2: qg0,
-                        pre_solve_element_thickness_m: trace_pre_thickness,
-                        pre_solve_grain_type: trace_pre_grain_type,
-                        pre_solve_density_kg_m3: trace_pre_density,
-                        pre_solve_node_temperature_k: trace_pre_nodes,
-                        post_solve_node_temperature_k: trace_post_solve_nodes,
-                        post_step_element_thickness_m: column
-                            .elements
-                            .iter()
-                            .map(|e| e.thickness)
-                            .collect(),
-                        post_step_node_temperature_k: column.node_temperature.clone(),
-                        surface_iterations: trace_surface_iterations,
-                    });
-                }
+            if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                collector.observe_trace(StepTrace {
+                    step: steps,
+                    time: t,
+                    dt_seconds: dt,
+                    air_temperature_k: ta,
+                    relative_humidity: rh,
+                    wind_m_s: vw,
+                    incoming_shortwave_horizontal_w_m2: iswr,
+                    incoming_longwave_w_m2: ilwr,
+                    pressure_pa: pressure,
+                    ground_temperature_k: tsg,
+                    z_wind_m: params.z_wind,
+                    z_scalar_m: params.z_scalar,
+                    roughness_length_m: params.z0,
+                    min_node: current_min.map(|(node, _)| node),
+                    min_node_k: current_min.map(|(_, kelvin)| kelvin),
+                    snowfall_m: solid,
+                    rain_m: liquid,
+                    deposited_kg_m2: deposited,
+                    deposition_buffer_kg_m2: deposition.buffered(),
+                    shortwave_absorbed_w_m2: trace_shortwave,
+                    internal_sources_w_m2: trace_sources,
+                    budget: [
+                        budget.olwr,
+                        budget.lwr_net,
+                        budget.sensible,
+                        budget.latent,
+                        budget.rain,
+                        budget.vapour_mass,
+                        budget.total,
+                    ],
+                    inferred_ground_flux_w_m2: qg0,
+                    pre_solve_element_thickness_m: trace_pre_thickness,
+                    pre_solve_grain_type: trace_pre_grain_type,
+                    pre_solve_density_kg_m3: trace_pre_density,
+                    pre_solve_node_temperature_k: trace_pre_nodes,
+                    post_solve_node_temperature_k: trace_post_solve_nodes,
+                    post_step_element_thickness_m: column
+                        .elements
+                        .iter()
+                        .map(|e| e.thickness)
+                        .collect(),
+                    post_step_node_temperature_k: column.node_temperature.clone(),
+                    surface_iterations: trace_surface_iterations,
+                    first_nonfinite_substep: trace_first_nonfinite_substep.clone(),
+                });
             }
         }
 
@@ -617,6 +669,7 @@ pub fn run_with_diagnostics(
                     node,
                     detail: format!("outside [{}, {}] K", cfg.t_crazy_min, cfg.t_crazy_max),
                 });
+                c.observe_refusal();
                 Some(Box::new(make_output(
                     rows.clone(),
                     pro_text.clone(),
@@ -659,6 +712,7 @@ pub fn run_with_diagnostics(
                     node: usize::MAX,
                     detail: field.clone(),
                 });
+                collector.observe_refusal();
             }
             let partial = make_output(
                 rows,

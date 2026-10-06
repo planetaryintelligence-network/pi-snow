@@ -43,8 +43,8 @@ pub struct StepTrace {
     pub z_wind_m: f64,
     pub z_scalar_m: f64,
     pub roughness_length_m: f64,
-    pub min_node: usize,
-    pub min_node_k: f64,
+    pub min_node: Option<usize>,
+    pub min_node_k: Option<f64>,
     pub snowfall_m: f64,
     pub rain_m: f64,
     pub deposited_kg_m2: f64,
@@ -61,6 +61,7 @@ pub struct StepTrace {
     pub post_step_element_thickness_m: Vec<f64>,
     pub post_step_node_temperature_k: Vec<f64>,
     pub surface_iterations: Vec<SurfaceIteration>,
+    pub first_nonfinite_substep: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,6 +75,7 @@ pub struct Collector {
     pub mode: DiagnosticMode,
     pub report: RunDiagnostics,
     preceding: VecDeque<StepTrace>,
+    cold_preceding: VecDeque<StepTrace>,
     first_cold_step: Option<usize>,
 }
 
@@ -97,6 +99,7 @@ impl Collector {
             mode,
             report,
             preceding: VecDeque::new(),
+            cold_preceding: VecDeque::new(),
             first_cold_step: None,
         }
     }
@@ -127,19 +130,37 @@ impl Collector {
         if !matches!(self.mode, DiagnosticMode::Trace) {
             return;
         }
-        if self.first_cold_step.is_none() && row.min_node_k < 220.0 {
-            self.first_cold_step = Some(row.step);
-            self.report.trace.extend(self.preceding.drain(..));
-        }
-        if self
-            .first_cold_step
-            .is_some_and(|first| row.step <= first + 8)
-        {
-            self.report.trace.push(row.clone());
+        if row.min_node_k.is_some() {
+            if self.first_cold_step.is_none() && row.min_node_k.is_some_and(|kelvin| kelvin < 220.0)
+            {
+                self.first_cold_step = Some(row.step);
+                self.report.trace.extend(self.cold_preceding.drain(..));
+            }
+            if self
+                .first_cold_step
+                .is_some_and(|first| row.step <= first + 8)
+            {
+                self.report.trace.push(row.clone());
+            }
+            self.cold_preceding.push_back(row.clone());
+            while self.cold_preceding.len() > 12 {
+                self.cold_preceding.pop_front();
+            }
         }
         self.preceding.push_back(row);
         while self.preceding.len() > 12 {
             self.preceding.pop_front();
+        }
+    }
+
+    pub fn observe_refusal(&mut self) {
+        if !matches!(self.mode, DiagnosticMode::Trace) {
+            return;
+        }
+        for row in &self.preceding {
+            if !self.report.trace.iter().any(|seen| seen.step == row.step) {
+                self.report.trace.push(row.clone());
+            }
         }
     }
 }
@@ -198,6 +219,14 @@ pub fn trace_jsonl(station: &str, report: &RunDiagnostics) -> String {
 }
 
 fn step_json(r: &StepTrace) -> String {
+    let minimum_node = r
+        .min_node
+        .map_or_else(|| "null".to_string(), |node| node.to_string());
+    let minimum_temperature = r.min_node_k.map_or_else(|| "null".to_string(), number);
+    let first_nonfinite_substep = r
+        .first_nonfinite_substep
+        .as_deref()
+        .map_or_else(|| "null".to_string(), quote);
     let iterations = r.surface_iterations.iter().map(|i| format!(
         "{{\"iteration\":{},\"linearization_input_K\":{},\"linearization_K\":{},\"a_W_m2\":{},\"b_W_m2_K\":{},\"finite_difference_budget_f0_W_m2\":{},\"finite_difference_budget_f1_W_m2\":{},\"raw_finite_difference_slope_W_m2_K\":{},\"finite_difference_budget_f0_terms\":{},\"finite_difference_budget_f1_terms\":{},\"radiative_slope_W_m2_K\":{},\"solved_surface_K\":{},\"nonlinear_budget_W_m2\":{},\"solved_surface_budget_terms\":{},\"surface_linearization_residual_W_m2\":{},\"conduction\":{{\"layers\":{},\"min_thickness_m\":{},\"max_thickness_m\":{},\"min_conductance_W_m2_K\":{},\"max_conductance_W_m2_K\":{},\"min_half_capacity_W_m2_K\":{},\"max_half_capacity_W_m2_K\":{},\"min_diagonal\":{},\"max_diagonal\":{},\"min_abs_off_diagonal\":{},\"max_abs_off_diagonal\":{},\"residual_linf\":{}}}}}",
         i.iteration, number(i.linearization_input_k), number(i.linearization_temperature_k),
@@ -215,7 +244,7 @@ fn step_json(r: &StepTrace) -> String {
         number(i.conduction.max_abs_off_diagonal), number(i.conduction.residual_linf)
     )).collect::<Vec<_>>().join(",");
     format!(
-        "{{\"record\":\"step\",\"step\":{},\"time\":{},\"dt_seconds\":{},\"air_temperature_K\":{},\"relative_humidity\":{},\"wind_m_s\":{},\"incoming_shortwave_horizontal_W_m2\":{},\"incoming_longwave_W_m2\":{},\"pressure_Pa\":{},\"ground_temperature_K\":{},\"z_wind_m\":{},\"z_scalar_m\":{},\"roughness_length_m\":{},\"min_node\":{},\"min_node_temperature_K\":{},\"snowfall_m\":{},\"rain_m\":{},\"deposited_kg_m2\":{},\"deposition_buffer_kg_m2\":{},\"shortwave_absorbed_W_m2\":{},\"internal_sources_W_m2\":[{}],\"budget\":{{\"olwr\":{},\"lwr_net\":{},\"sensible\":{},\"latent\":{},\"rain\":{},\"vapour_mass\":{},\"total\":{}}},\"inferred_ground_flux_W_m2\":{},\"pre_solve_element_thickness_m\":[{}],\"pre_solve_grain_type\":[{}],\"pre_solve_density_kg_m3\":[{}],\"pre_solve_node_temperature_K\":[{}],\"post_solve_node_temperature_K\":[{}],\"post_step_element_thickness_m\":[{}],\"post_step_node_temperature_K\":[{}],\"surface_iterations\":[{}]}}",
+        "{{\"record\":\"step\",\"step\":{},\"time\":{},\"dt_seconds\":{},\"air_temperature_K\":{},\"relative_humidity\":{},\"wind_m_s\":{},\"incoming_shortwave_horizontal_W_m2\":{},\"incoming_longwave_W_m2\":{},\"pressure_Pa\":{},\"ground_temperature_K\":{},\"z_wind_m\":{},\"z_scalar_m\":{},\"roughness_length_m\":{},\"min_node\":{},\"min_node_temperature_K\":{},\"snowfall_m\":{},\"rain_m\":{},\"deposited_kg_m2\":{},\"deposition_buffer_kg_m2\":{},\"shortwave_absorbed_W_m2\":{},\"internal_sources_W_m2\":[{}],\"budget\":{{\"olwr\":{},\"lwr_net\":{},\"sensible\":{},\"latent\":{},\"rain\":{},\"vapour_mass\":{},\"total\":{}}},\"inferred_ground_flux_W_m2\":{},\"pre_solve_element_thickness_m\":[{}],\"pre_solve_grain_type\":[{}],\"pre_solve_density_kg_m3\":[{}],\"pre_solve_node_temperature_K\":[{}],\"post_solve_node_temperature_K\":[{}],\"post_step_element_thickness_m\":[{}],\"post_step_node_temperature_K\":[{}],\"surface_iterations\":[{}],\"first_nonfinite_substep\":{}}}",
         r.step,
         quote(&r.time.to_rfc3339()),
         number(r.dt_seconds),
@@ -229,8 +258,8 @@ fn step_json(r: &StepTrace) -> String {
         number(r.z_wind_m),
         number(r.z_scalar_m),
         number(r.roughness_length_m),
-        r.min_node,
-        number(r.min_node_k),
+        minimum_node,
+        minimum_temperature,
         number(r.snowfall_m),
         number(r.rain_m),
         number(r.deposited_kg_m2),
@@ -256,7 +285,8 @@ fn step_json(r: &StepTrace) -> String {
         numbers(&r.post_solve_node_temperature_k),
         numbers(&r.post_step_element_thickness_m),
         numbers(&r.post_step_node_temperature_k),
-        iterations
+        iterations,
+        first_nonfinite_substep
     )
 }
 

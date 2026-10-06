@@ -5,6 +5,8 @@
 //! `--physics KEY=VALUE` (repeatable) selects a labelled physics variant; with
 //! none given the engine is exactly the Phase 2 engine. See
 //! `pi_snow_core::options`.
+//! `SNOW_ALBEDO=CHAN2022_MERRA2` also requires `--merra2-deposition CSV` with
+//! hourly BC and dust deposition rates from the registered source.
 //!
 //! `pi-snow batch ...` runs many columns in one process; see
 //! `pi_snow_cli::batch`.
@@ -12,7 +14,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use pi_snow_cli::unit::{parse_end, parse_physics, run_unit};
+use pi_snow_cli::unit::{parse_end, parse_physics, run_unit_with_deposition};
+use pi_snow_physics::chan_albedo::DepositionSeries;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -29,8 +32,15 @@ fn main() -> Result<()> {
     let end_text = flag("-e").context("usage: pi-snow -c <ini> -e <end>")?;
     let end = parse_end(&end_text)?;
     let physics = parse_physics(&args[1..])?;
+    let merra2 = flag("--merra2-deposition")
+        .map(|path| {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading MERRA-2 deposition CSV {path}"))?;
+            DepositionSeries::from_csv(&text).map_err(anyhow::Error::msg)
+        })
+        .transpose()?;
 
-    let run = run_unit(&ini_path, end, &physics)?;
+    let run = run_unit_with_deposition(&ini_path, end, &physics, merra2.as_ref())?;
     eprintln!(
         "pi-snow {}: {} steps for {} in {:.3} s",
         env!("CARGO_PKG_VERSION"),

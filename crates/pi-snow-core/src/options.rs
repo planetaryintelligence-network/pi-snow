@@ -92,6 +92,8 @@ pub enum SnowAlbedo {
     Vionnet2012,
     /// Aoki et al. (2003), Figure 6 and Table 2, temperature-rate aging.
     Aoki2003TempRate,
+    /// Chan et al. (2022) SLAIR with independent MERRA-2 impurity deposition.
+    Chan2022Merra2,
 }
 
 /// Growth of wet rounded grains.
@@ -262,6 +264,7 @@ impl PhysicsOptions {
                 self.snow_albedo = match value {
                     "VIONNET2012" => SnowAlbedo::Vionnet2012,
                     "AOKI2003_TEMP_RATE" => SnowAlbedo::Aoki2003TempRate,
+                    "CHAN2022_MERRA2" => SnowAlbedo::Chan2022Merra2,
                     _ => return Err(bad()),
                 }
             }
@@ -395,6 +398,8 @@ mod tests {
         assert!(PhysicsOptions::from_settings(["WET_GRAIN_GROWTH=YES"]).is_err());
         let o = PhysicsOptions::from_settings(["SNOW_ALBEDO=AOKI2003_TEMP_RATE"]).unwrap();
         assert_eq!(o.snow_albedo, SnowAlbedo::Aoki2003TempRate);
+        let o = PhysicsOptions::from_settings(["SNOW_ALBEDO=CHAN2022_MERRA2"]).unwrap();
+        assert_eq!(o.snow_albedo, SnowAlbedo::Chan2022Merra2);
         assert!(PhysicsOptions::from_settings(["SNOW_ALBEDO=UNKNOWN"]).is_err());
     }
 

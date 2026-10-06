@@ -1,0 +1,33 @@
+[package]
+name = "pi-snow-gpu-alternatives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pi-snow-core.workspace = true
+pi-snow-io.workspace = true
+pi-snow-physics.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }
+
+[[bin]]
+name = "pi-snow-gpu-alt-control"
+path = "src/bin/pi-snow-gpu.rs"
+
+[[bin]]
+name = "pi-snow-gpu-a5"
+path = "src/bin/pi-snow-gpu-a5.rs"
+
+[[bin]]
+name = "pi-snow-gpu-a1a2"
+path = "src/bin/pi-snow-gpu-a1a2.rs"
+
+[dev-dependencies]
+approx.workspace = true
+
+[[bin]]
+name = "pi-snow-gpu-a6"
+path = "src/bin/pi-snow-gpu-a6.rs"

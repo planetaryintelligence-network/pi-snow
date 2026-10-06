@@ -114,6 +114,13 @@ fn soil_stefan_neumann() {
     let f1 = soil.phase(crossing + 1).liquid_fraction;
     let measured =
         DEPTHS_M[crossing] + (DEPTHS_M[crossing + 1] - DEPTHS_M[crossing]) * (0.5 - f0) / (f1 - f0);
+    let frozen_volume: f64 = (0..10)
+        .map(|i| SoilColumn::node_volume(i) * (1.0 - soil.phase(i).liquid_fraction))
+        .sum();
+    eprintln!(
+        "Neumann diagnostics: liquid fractions {:?}, frozen-volume front {frozen_volume} m",
+        std::array::from_fn::<_, 10, _>(|i| soil.phase(i).liquid_fraction)
+    );
     assert!(
         (measured / reference - 1.0).abs() <= 0.05,
         "10 d freezing front {measured} m, Neumann {reference} m"

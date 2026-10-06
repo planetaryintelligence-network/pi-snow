@@ -405,6 +405,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-snow-gpu-alternatives-v2"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "cudarc",
+ "pi-snow-core",
+ "pi-snow-gpu",
+ "pi-snow-io",
+ "pi-snow-physics",
+]
+
+[[package]]
 name = "pi-snow-io"
 version = "0.1.0"
 dependencies = [

@@ -232,15 +232,8 @@ pub fn scan(
     for (nodes, fraction) in [(&mut frozen, 0.0), (&mut liquid, 1.0)] {
         let upper = entry.material.capacity(fraction) * SoilColumn::node_volume(0) / dt + g0;
         let mut solve = |t| dirichlet(entry, dt, bottom, t);
-        resolve(
-            nodes,
-            0,
-            nodes.len() - 1,
-            lower,
-            upper,
-            &mut solve,
-            &mut spent,
-        )?;
+        let last = nodes.len() - 1;
+        resolve(nodes, 0, last, lower, upper, &mut solve, &mut spent)?;
     }
     let nodes = [frozen, plateau, liquid];
     let crossing = |a: &Node, b: &Node| a.sign.unwrap() * b.sign.unwrap() < 0;

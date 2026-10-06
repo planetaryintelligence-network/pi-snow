@@ -1,6 +1,7 @@
 //! Registered engine-soil-spinup-v1 soil state and conservative thermal solver.
 //! Soil stays separate from the native snow composition and bucket transport.
 
+pub mod bare;
 mod properties;
 mod solver;
 

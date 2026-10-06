@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn bare_soil_surface_solve() {
+    use pi_snow_physics::surface::{Atmosphere, SurfaceParameters};
+    use pi_snow_physics::turbulence::Scheme;
+    let params = SurfaceParameters {
+        emissivity: 0.97,
+        z_wind: 2.0,
+        z_scalar: 2.0,
+        z0: 0.01,
+        scheme: Scheme::Louis,
+    };
+    for (temperature, shortwave) in [(300.0, 500.0), (255.0, 0.0), (273.15, 100.0)] {
+        let atm = Atmosphere {
+            t_air: temperature,
+            relative_humidity: 0.7,
+            wind: 2.0,
+            absorbed_shortwave: shortwave,
+            ilwr: 300.0,
+            pressure: 80000.0,
+            rain_rate: 0.0,
+        };
+        let mut soil = SoilColumn::uniform(Material::MoistLoam, temperature);
+        let report = bare::step(&mut soil, 600.0, Bottom::Geothermal005, &atm, &params).unwrap();
+        assert!(
+            (report.surface_flux_w_m2
+                - bare::budget(&atm, &params, soil.phase(0).temperature_k).total)
+                .abs()
+                <= 1e-6
+        );
+        assert!(report.soil.ledger_residual_j_m2.abs() <= 1e-3);
+        assert!(
+            (bare::budget(&atm, &params, 300.0).total - bare::budget(&atm, &params, 301.0).total)
+                .abs()
+                > 1.0
+        );
+    }
+    let mut soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let bump = |t: f64| -15.0 * (t - 280.0) + 1000.0 * (-(t - 290.0).powi(2)).exp();
+    let report = bare::solve(&mut soil, 600.0, Bottom::Insulated, bump).unwrap();
+    assert_eq!(report.monotonicity_violations, 1);
+    assert!((report.surface_flux_w_m2 - bump(soil.phase(0).temperature_k)).abs() <= 1e-6);
+}
+
+#[test]
 fn soil_column_periodic_damping() {
     let material = Material::MoistLoam;
     let conductivity = material.conductivity(1.0);

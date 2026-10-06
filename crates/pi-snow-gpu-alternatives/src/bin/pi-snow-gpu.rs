@@ -1,19 +1,19 @@
-//! `pi-snow-gpu`: the engine-gpu-v1 driver. Subcommands:
+//! `pi-snow-gpu-alt-control`: the isolated gpu-alternatives-v1 control driver. Subcommands:
 //!
 //! ```text
-//! pi-snow-gpu batch ...                                    pi-snow batch's interface (src/batch.rs)
-//! pi-snow-gpu lockstep --list FILE --from R --to R --out JSON [--precision F64|F32|F32K]
+//! pi-snow-gpu-alt-control batch ...                                    pi-snow batch's interface (src/batch.rs)
+//! pi-snow-gpu-alt-control lockstep --list FILE --from R --to R --out JSON [--precision F64|F32|F32K]
 //!                                                        G1a or precision development lockstep
-//! pi-snow-gpu grid --forcing DIR --ini TEMPLATE --pixels FILE --batch B --out DIR
+//! pi-snow-gpu-alt-control grid --forcing DIR --ini TEMPLATE --pixels FILE --batch B --out DIR
 //!                [--precision F64|MIX|F32|F32K] [--nmax N] [--threads T]   grid season, daily fields (G2)
-//! pi-snow-gpu write-units --forcing DIR --ini TEMPLATE --pixels FILE --out DIR
+//! pi-snow-gpu-alt-control write-units --forcing DIR --ini TEMPLATE --pixels FILE --out DIR
 //!                unit directories (INI, 10-minute SMET, SNO) for pi-snow and batch (G1c, G2)
-//! pi-snow-gpu cpu-grid --forcing DIR --ini TEMPLATE --pixels FILE --threads T --out JSON
+//! pi-snow-gpu-alt-control cpu-grid --forcing DIR --ini TEMPLATE --pixels FILE --threads T --out JSON
 //!                the CPU stepper on grid pixels, no output: physics-only CPU cost (G2)
-//! pi-snow-gpu cpu-unit <ini> <end>                         CPU stepper on one unit (G0)
-//! pi-snow-gpu dev-lockstep <columns> <days> <from> <to> [variant]  lockstep, synthetic
-//! pi-snow-gpu dev-compare <columns> <days> <dir> [mix]     GPU vs CPU files, synthetic
-//! pi-snow-gpu identity [F64|F32|F32K]                      compile and report default PTX
+//! pi-snow-gpu-alt-control cpu-unit <ini> <end>                         CPU stepper on one unit (G0)
+//! pi-snow-gpu-alt-control dev-lockstep <columns> <days> <from> <to> [variant]  lockstep, synthetic
+//! pi-snow-gpu-alt-control dev-compare <columns> <days> <dir> [mix]     GPU vs CPU files, synthetic
+//! pi-snow-gpu-alt-control identity [F64|F32|F32K]                      compile and report default PTX
 //! ```
 
 use std::path::PathBuf;

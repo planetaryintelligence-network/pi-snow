@@ -120,8 +120,12 @@ pub(super) fn step(
     let old = soil.enthalpy;
     let mut h = old;
     let before: f64 = old.iter().sum();
+    // As in the native thermal assembly, material coefficients belong to the
+    // composition at step entry. Temperatures and latent enthalpy are implicit.
+    // Iterating Johansen's frozen/unfrozen branch inside Newton would make the
+    // residual discontinuous at disappearance of the last soil ice.
+    let (g, deep) = conductances(soil, &old);
     for iteration in 0..240 {
-        let (g, deep) = conductances(soil, &h);
         let (r, _, qtop, qbottom) = residual(soil, &old, &h, dt, top, bottom, &g, deep);
         let norm = r.iter().fold(0.0_f64, |a, x| a.max(x.abs()));
         if norm < 1e-5 {
@@ -141,18 +145,15 @@ pub(super) fn step(
         let mut diagonal = [0.0; 10];
         let mut lower = [0.0; 10];
         let mut upper = [0.0; 10];
-        // Phase-dependent conductivity also changes the residual while T(H)
-        // is flat. Include that derivative rather than using a frozen-K Jacobian.
+        // Differentiate the implicit sharp T(H) map, with entry coefficients.
         for j in 0..10 {
             let delta = (h[j].abs() * 1e-6).max(1.0);
             let mut plus = h;
             let mut minus = h;
             plus[j] += delta;
             minus[j] -= delta;
-            let (gp, bp) = conductances(soil, &plus);
-            let (gm, bm) = conductances(soil, &minus);
-            let (rp, _, _, _) = residual(soil, &old, &plus, dt, top, bottom, &gp, bp);
-            let (rm, _, _, _) = residual(soil, &old, &minus, dt, top, bottom, &gm, bm);
+            let (rp, _, _, _) = residual(soil, &old, &plus, dt, top, bottom, &g, deep);
+            let (rm, _, _, _) = residual(soil, &old, &minus, dt, top, bottom, &g, deep);
             diagonal[j] = (rp[j] - rm[j]) / (2.0 * delta);
             if j > 0 {
                 upper[j - 1] = (rp[j - 1] - rm[j - 1]) / (2.0 * delta);
@@ -162,13 +163,12 @@ pub(super) fn step(
             }
         }
         let direction = solve_tridiagonal(&lower, &diagonal, &upper, &r.map(|v| -v));
-        // A residual line search safeguards changes in both phase and conductivity.
+        // A residual line search safeguards crossings of the phase corners.
         let mut scale = 1.0;
         let mut accepted = false;
         for _ in 0..32 {
             let trial = std::array::from_fn(|i| h[i] + scale * direction[i]);
-            let (gt, dtbot) = conductances(soil, &trial);
-            let (rt, _, _, _) = residual(soil, &old, &trial, dt, top, bottom, &gt, dtbot);
+            let (rt, _, _, _) = residual(soil, &old, &trial, dt, top, bottom, &g, deep);
             let next = rt.iter().fold(0.0_f64, |a, x| a.max(x.abs()));
             if next.is_finite() && next < norm {
                 h = trial;

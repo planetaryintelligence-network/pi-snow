@@ -34,10 +34,11 @@ pub struct StepReport {
     pub iterations: usize,
 }
 
-fn conductances(soil: &SoilColumn, h: &[f64; 10]) -> ([f64; 9], f64) {
+pub(super) fn conductances(soil: &SoilColumn, h: &[f64; 10]) -> ([f64; 9], f64) {
     let conductivity: [f64; 10] = std::array::from_fn(|i| {
         let phase = soil.material.phase(h[i] / SoilColumn::node_volume(i));
-        soil.material.conductivity(phase.liquid_fraction)
+        soil.material
+            .conductivity(phase.temperature_k, phase.liquid_fraction)
     });
     let links = std::array::from_fn(|i| {
         2.0 / (1.0 / conductivity[i] + 1.0 / conductivity[i + 1]) / (DEPTHS_M[i + 1] - DEPTHS_M[i])

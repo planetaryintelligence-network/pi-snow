@@ -34,7 +34,7 @@ impl Material {
             + self.water_kg_m3() * (C_ICE * (1.0 - liquid_fraction) + C_LIQUID * liquid_fraction)
     }
 
-    pub fn conductivity(self, liquid_fraction: f64) -> f64 {
+    pub fn conductivity(self, temperature_k: f64, liquid_fraction: f64) -> f64 {
         let rho_dry = 2700.0 * (1.0 - POROSITY);
         let dry = (0.135 * rho_dry + 64.7) / (2700.0 - 0.947 * rho_dry);
         let solid: f64 = (8.80 * 40.0 + 2.92 * 20.0) / 60.0;
@@ -42,7 +42,7 @@ impl Material {
             * 0.57_f64.powf(POROSITY * liquid_fraction)
             * 2.29_f64.powf(POROSITY * (1.0 - liquid_fraction));
         let saturation = self.water_kg_m3() / 1000.0 / POROSITY;
-        let kersten = if liquid_fraction < 1.0 {
+        let kersten = if temperature_k < FREEZING_K {
             saturation
         } else {
             (saturation.log10() + 1.0).max(0.0)

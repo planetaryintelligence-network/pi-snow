@@ -46,7 +46,7 @@ fn bare_soil_surface_solve() {
 #[test]
 fn soil_column_periodic_damping() {
     let material = Material::MoistLoam;
-    let conductivity = material.conductivity(1.0);
+    let conductivity = material.conductivity(FREEZING_K, 1.0);
     let diffusivity = conductivity / material.capacity(1.0);
     for (days, depths, tolerance, lag_tolerance) in [
         (1.0, [0.05, 0.20], 0.10, 7200.0),
@@ -116,8 +116,8 @@ fn erf(x: f64) -> f64 {
 #[test]
 fn soil_stefan_neumann() {
     let material = Material::MoistLoam;
-    let k_frozen = material.conductivity(0.0);
-    let k_liquid = material.conductivity(1.0);
+    let k_frozen = material.conductivity(FREEZING_K - 5.0, 0.0);
+    let k_liquid = material.conductivity(FREEZING_K, 1.0);
     let a_frozen = k_frozen / material.capacity(0.0);
     let a_liquid = k_liquid / material.capacity(1.0);
     let latent = material.water_kg_m3() * LATENT_J_KG;
@@ -140,16 +140,53 @@ fn soil_stefan_neumann() {
             hi = mid;
         }
     }
-    let reference = (lo + hi) * (a_frozen * 10.0 * 86400.0).sqrt();
+    let lambda = 0.5 * (lo + hi);
+    let nu = lambda * (a_frozen / a_liquid).sqrt();
+    let reference = 2.0 * lambda * (a_frozen * 10.0 * 86400.0).sqrt();
     let mut soil = SoilColumn::uniform(material, FREEZING_K + 2.0);
-    for _ in 0..1440 {
+    let mut insulated = soil.clone();
+    for step in 1..=1440 {
+        let time = step as f64 * 600.0;
+        let exact_bottom = -k_liquid * 2.0 * (-1.0 / (4.0 * a_liquid * time)).exp()
+            / ((1.0 - erf(nu)) * (std::f64::consts::PI * a_liquid * time).sqrt());
         soil.step(
             600.0,
             Surface::Temperature(FREEZING_K - 5.0),
-            Bottom::Insulated,
+            Bottom::Flux(exact_bottom),
         )
         .unwrap();
+        insulated
+            .step(
+                600.0,
+                Surface::Temperature(FREEZING_K - 5.0),
+                Bottom::Insulated,
+            )
+            .unwrap();
+        if step % 144 == 0 {
+            let (volume, interp) = freezing_fronts(&soil);
+            let analytic = 2.0 * lambda * (a_frozen * time).sqrt();
+            eprintln!(
+                "U5 day {}: ice-equivalent {volume:.12} m, 50%-liquid {interp:.12} m, Neumann {analytic:.12} m, volume error {:.6}%",
+                step / 144,
+                100.0 * (volume / analytic - 1.0)
+            );
+        }
     }
+    let (frozen_volume, measured) = freezing_fronts(&soil);
+    eprintln!(
+        "U5 insulated diagnostic: {:?}; expected amended volume about 0.45416 m (-1.37%)",
+        freezing_fronts(&insulated)
+    );
+    eprintln!(
+        "U5 final half-space: volume {frozen_volume:.12} m, 50%-liquid {measured:.12} m, Neumann {reference:.12} m"
+    );
+    assert!(
+        (frozen_volume / reference - 1.0).abs() <= 0.05,
+        "10 d ice-equivalent freezing front {frozen_volume} m, Neumann {reference} m"
+    );
+}
+
+fn freezing_fronts(soil: &SoilColumn) -> (f64, f64) {
     let crossing = (0..9)
         .find(|&i| soil.phase(i).liquid_fraction <= 0.5 && soil.phase(i + 1).liquid_fraction > 0.5)
         .unwrap();
@@ -160,14 +197,7 @@ fn soil_stefan_neumann() {
     let frozen_volume: f64 = (0..10)
         .map(|i| SoilColumn::node_volume(i) * (1.0 - soil.phase(i).liquid_fraction))
         .sum();
-    eprintln!(
-        "Neumann diagnostics: liquid fractions {:?}, frozen-volume front {frozen_volume} m",
-        std::array::from_fn::<_, 10, _>(|i| soil.phase(i).liquid_fraction)
-    );
-    assert!(
-        (measured / reference - 1.0).abs() <= 0.05,
-        "10 d freezing front {measured} m, Neumann {reference} m"
-    );
+    (frozen_volume, measured)
 }
 
 #[test]
@@ -175,9 +205,10 @@ fn soil_initial_profile() {
     for material in [Material::MoistLoam, Material::DryLoam] {
         let warm = SoilColumn::air_profile(material, 275.0, 285.0, 3.0);
         let cold = SoilColumn::air_profile(material, 275.0, 285.0, -3.0);
-        let damping = (material.conductivity(1.0) / material.capacity(1.0) * 30.0 * 86400.0
-            / std::f64::consts::PI)
-            .sqrt();
+        let damping =
+            (material.conductivity(FREEZING_K, 1.0) / material.capacity(1.0) * 30.0 * 86400.0
+                / std::f64::consts::PI)
+                .sqrt();
         for i in 0..10 {
             let expected = 275.0 + 10.0 * (-DEPTHS_M[i] / damping).exp() + 3.0;
             assert!((warm.phase(i).temperature_k - expected).abs() < 1e-12);

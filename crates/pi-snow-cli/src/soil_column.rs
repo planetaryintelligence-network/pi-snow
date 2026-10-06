@@ -27,9 +27,10 @@ impl SoilColumn {
     }
 
     pub fn air_profile(material: Material, tbot_k: f64, mean_336h_k: f64, offset_k: f64) -> Self {
-        let damping_m = (material.conductivity(1.0) / material.capacity(1.0) * 30.0 * 86400.0
-            / std::f64::consts::PI)
-            .sqrt();
+        let damping_m =
+            (material.conductivity(FREEZING_K, 1.0) / material.capacity(1.0) * 30.0 * 86400.0
+                / std::f64::consts::PI)
+                .sqrt();
         Self {
             material,
             enthalpy: std::array::from_fn(|i| {

@@ -109,8 +109,12 @@ pub fn solve(
     if trial(lo)?.0 > 0.0 || trial(hi)?.0 < 0.0 {
         return Err("bare-soil balance has no bracket in [210,340] K".into());
     }
-    let k0 = entry.material.conductivity(entry.phase(0).liquid_fraction);
-    let k1 = entry.material.conductivity(entry.phase(1).liquid_fraction);
+    let k0 = entry
+        .material
+        .conductivity(entry.phase(0).temperature_k, entry.phase(0).liquid_fraction);
+    let k1 = entry
+        .material
+        .conductivity(entry.phase(1).temperature_k, entry.phase(1).liquid_fraction);
     let anchor = entry
         .material
         .capacity(0.0)

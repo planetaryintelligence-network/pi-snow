@@ -175,7 +175,7 @@ fn ini_text(template: &str, key: &str) -> Result<String> {
 
 fn extract(error: &RunError) -> Option<(usize, Option<RunDiagnostics>)> {
     match error {
-        RunError::Crazy { partial, .. } => partial.as_deref().map(|p| (p.steps, p.diagnostics.clone())),
+        RunError::Crazy { partial, .. } => Some(&**partial).map(|p| (p.steps, p.diagnostics.clone())),
         RunError::NonFinite { partial, .. } => Some((partial.steps, partial.diagnostics.clone())),
         _ => None,
     }

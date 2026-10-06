@@ -9,7 +9,7 @@ license.workspace = true
 pi-snow-core.workspace = true
 pi-snow-io.workspace = true
 pi-snow-physics.workspace = true
-pi-snow-gpu = { path = "../pi-snow-gpu" }
+pi-snow-gpu = { path = "../../crates/pi-snow-gpu" }
 anyhow.workspace = true
 chrono.workspace = true
 cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "dynamic-loading"] }

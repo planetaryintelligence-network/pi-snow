@@ -4,7 +4,7 @@ use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 fn main() -> Result<()> {
     let arg = std::env::args().nth(1).unwrap_or_default();
     let source = match arg.as_str() {
-        "F64" | "F32" => include_str!("../../../pi-snow-gpu/kernels/pi_snow.cu"),
+        "F64" | "F32" => include_str!("../../../../crates/pi-snow-gpu/kernels/pi_snow.cu"),
         "A5" => include_str!("../../kernels/pi_snow_a5.cu"),
         "A6" => include_str!("../../kernels/pi_snow_a6.cu"),
         "A6-audit" => include_str!("../../kernels/pi_snow_a6_audit.cu"),

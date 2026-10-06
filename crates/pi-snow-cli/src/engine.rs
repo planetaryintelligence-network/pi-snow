@@ -21,8 +21,8 @@
 use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{NODATA, RHO_WATER, T_MELT};
 use pi_snow_core::options::{
-    GrainClassification, MassReport, S5Index, SnowAlbedo, SublimationMeltOut, SurfaceLayer,
-    SurfaceLinearisation, Turbulence, WetGrainGrowth,
+    DrySettlement, FreshSnowDensity, GrainClassification, MassReport, S5Index, SnowAlbedo,
+    SublimationMeltOut, SurfaceLayer, SurfaceLinearisation, Turbulence, WetGrainGrowth,
 };
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
@@ -32,10 +32,13 @@ use pi_snow_physics::albedo;
 use pi_snow_physics::aoki_albedo::{self, AokiAlbedo};
 use pi_snow_physics::atmosphere::pressure_at_altitude;
 use pi_snow_physics::chan_albedo::{self, DepositionSeries, Slair};
+use pi_snow_physics::density_settlement::{
+    DensitySettlementViscosity, Scheme as DensitySettlementScheme,
+};
 use pi_snow_physics::grain_classification;
 use pi_snow_physics::metamorphism::{self, History, Local};
 use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
-use pi_snow_physics::settlement::{self, Br92, Viscosity};
+use pi_snow_physics::settlement::{self, Viscosity};
 use pi_snow_physics::solar;
 use pi_snow_physics::stability::{self, GrainClass, Layer};
 use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
@@ -58,12 +61,14 @@ const MIN_MEASUREMENT_HEIGHT: f64 = 0.5;
 pub enum RunError {
     #[error("forcing field {0} is missing")]
     MissingField(&'static str),
-    #[error("temperature {value} K at {time} is outside T_CRAZY [{min}, {max}]")]
+    #[error("temperature {value} K at node {node}, time {time} is outside T_CRAZY [{min}, {max}]")]
     Crazy {
+        node: usize,
         time: DateTime<Utc>,
         value: f64,
         min: f64,
         max: f64,
+        partial: Box<RunOutput>,
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
@@ -104,6 +109,8 @@ pub struct RunOutput {
     pub mass: Option<String>,
     /// Per-step Chan branches and daily SLAIR mass reconciliation, candidate only.
     pub chan_csv: Option<String>,
+    /// Initial density and forcing conditions for newly deposited elements.
+    pub density_events: Option<String>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -208,9 +215,12 @@ pub fn run_with_options_and_deposition(
             "CHAN2022_MERRA2 requires --merra2-deposition CSV",
         ));
     }
-    let density_scheme = match cfg.new_snow_density {
-        NewSnowDensity::LehningNew => DensityScheme::Pahaut,
-        NewSnowDensity::Zwart => DensityScheme::Zwart,
+    let density_scheme = match options.fresh_snow_density {
+        FreshSnowDensity::A76Anderson1976 => DensityScheme::Anderson1976,
+        FreshSnowDensity::Phase2 => match cfg.new_snow_density {
+            NewSnowDensity::LehningNew => DensityScheme::Pahaut,
+            NewSnowDensity::Zwart => DensityScheme::Zwart,
+        },
     };
     let conductivity = Conductivity::Yen1981;
     let pressure = pressure_at_altitude(site.altitude);
@@ -254,13 +264,18 @@ pub fn run_with_options_and_deposition(
     let mut first_output = true;
     let mut steps = 0usize;
     let mut ledger = (options.mass_report == MassReport::Ledger).then(Ledger::new);
+    let mut density_events = (options.fresh_snow_density != FreshSnowDensity::Phase2
+        || options.dry_settlement != DrySettlement::Br92)
+        .then(|| String::from("timestamp_utc,event,element,initial_density_kg_m3,element_mass_kg_m2,element_height_m,air_temp_c,surface_temp_c,relative_humidity,wind_m_s\n"));
+    let mut density_event_number = 0usize;
     let mut interval = Interval::default();
     let make_output = |rows: Vec<OutputRow>,
                        pro_text: String,
                        steps: usize,
                        ledger: Option<Ledger>,
+                       density_events: Option<String>,
                        chan_csv: Option<String>| RunOutput {
-        smet: pi_snow_io::smet::write_output_smet(
+        smet: pi_snow_io::smet::write_output_smet_with_acdd(
             &site.station_id,
             &site.station_name,
             site.latitude,
@@ -269,10 +284,12 @@ pub fn run_with_options_and_deposition(
             site.slope_angle,
             site.slope_azimuth,
             &rows,
+            cfg.acdd_write,
         ),
         pro: pro_text,
         steps,
         mass: ledger.map(Ledger::into_text),
+        density_events,
         chan_csv,
     };
 
@@ -341,6 +358,25 @@ pub fn run_with_options_and_deposition(
         let new_snow_density = (options.snow_albedo == SnowAlbedo::Aoki2003TempRate)
             .then(|| density_scheme.density(&conditions));
         let deposited = deposition.add(&mut column, solid, &conditions, density_scheme);
+        if deposited > 0.0 {
+            if let Some(events) = density_events.as_mut() {
+                let density = density_scheme.density(&conditions);
+                let element_mass = cfg.height_new_element * density;
+                let count = (deposited / element_mass).round() as usize;
+                density_event_number += 1;
+                for element in 1..=count {
+                    events.push_str(&format!(
+                        "{},{density_event_number},{element},{density:.9},{element_mass:.9},{:.9},{:.6},{:.6},{:.9},{:.6}\n",
+                        t.to_rfc3339(),
+                        cfg.height_new_element,
+                        ta - T_MELT,
+                        t_surface - T_MELT,
+                        rh,
+                        vw,
+                    ));
+                }
+            }
+        }
         let deposited_height = new_snow_density
             .filter(|density| *density > 0.0)
             .map_or(0.0, |density| deposited / density);
@@ -531,7 +567,7 @@ pub fn run_with_options_and_deposition(
             }
 
             // 7. Settlement.
-            settlement::step(&mut column, dt, Br92);
+            settlement::step(&mut column, dt, density_settlement_viscosity(options));
 
             // 8. Metamorphism and ageing.
             let temps = column.element_temperatures();
@@ -572,13 +608,22 @@ pub fn run_with_options_and_deposition(
             (b, absorbed.albedo, qg0)
         };
 
-        for &t_node in &column.node_temperature {
+        for (node, &t_node) in column.node_temperature.iter().enumerate() {
             if t_node < cfg.t_crazy_min || t_node > cfg.t_crazy_max {
                 return Err(RunError::Crazy {
+                    node,
                     time: t,
                     value: t_node,
                     min: cfg.t_crazy_min,
                     max: cfg.t_crazy_max,
+                    partial: Box::new(make_output(
+                        rows,
+                        pro_text,
+                        steps,
+                        ledger,
+                        density_events.clone(),
+                        chan_csv.clone(),
+                    )),
                 });
             }
         }
@@ -644,7 +689,14 @@ pub fn run_with_options_and_deposition(
                 step: steps,
                 time: t,
                 field,
-                partial: Box::new(make_output(rows, pro_text, steps, ledger, chan_csv.clone())),
+                partial: Box::new(make_output(
+                    rows,
+                    pro_text,
+                    steps,
+                    ledger,
+                    density_events.clone(),
+                    chan_csv.clone(),
+                )),
             });
         }
 
@@ -678,7 +730,14 @@ pub fn run_with_options_and_deposition(
             interval = Interval::default();
         }
     }
-    Ok(make_output(rows, pro_text, steps, ledger, chan_csv))
+    Ok(make_output(
+        rows,
+        pro_text,
+        steps,
+        ledger,
+        density_events,
+        chan_csv,
+    ))
 }
 
 fn history(e: &Element) -> History {
@@ -843,6 +902,16 @@ fn hardness(code: u16, density: f64) -> f64 {
         .unwrap_or(NODATA)
 }
 
+fn density_settlement_viscosity(options: &PhysicsOptions) -> DensitySettlementViscosity {
+    let scheme = match options.dry_settlement {
+        DrySettlement::Br92 => DensitySettlementScheme::Br92,
+        DrySettlement::T11 => DensitySettlementScheme::T11,
+        DrySettlement::K75 => DensitySettlementScheme::K75,
+        DrySettlement::T11K75 => DensitySettlementScheme::T11K75,
+    };
+    DensitySettlementViscosity(scheme)
+}
+
 fn profile(t: DateTime<Utc>, c: &Column, options: &PhysicsOptions) -> ProTimestep {
     let layers = layers(c, options);
     let idx = stability::indices(&layers, c.snow_height());
@@ -853,7 +922,7 @@ fn profile(t: DateTime<Utc>, c: &Column, options: &PhysicsOptions) -> ProTimeste
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let eta = Br92.viscosity(e, temps[i]);
+            let eta = density_settlement_viscosity(options).viscosity(e, temps[i]);
             let stress = e.stress;
             ElementRecord {
                 top_height_cm: 100.0 * tops[i],

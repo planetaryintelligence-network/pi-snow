@@ -5,6 +5,7 @@ members = [
     "crates/pi-snow-io",
     "crates/pi-snow-physics",
     "crates/pi-snow-cli",
+    "crates/pi-snow-gpu",
 ]
 
 [workspace.package]

@@ -101,7 +101,7 @@ pub fn run_unit_with_deposition(
     ) {
         Ok(out) => out,
         Err(error) => {
-            if let RunError::NonFinite { partial, .. } = &error {
+            if let RunError::Crazy { partial, .. } | RunError::NonFinite { partial, .. } = &error {
                 write_output(&root, &cfg, partial)?;
             }
             return Err(error.into());
@@ -119,8 +119,12 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
     let output: PathBuf = root.join(&cfg.output_path);
     std::fs::create_dir_all(&output)?;
     let stem = output.join(format!("{}_{}", cfg.station_id, cfg.experiment));
-    std::fs::write(stem.with_extension("smet"), &out.smet)?;
-    std::fs::write(stem.with_extension("pro"), &out.pro)?;
+    if cfg.ts_write {
+        std::fs::write(stem.with_extension("smet"), &out.smet)?;
+    }
+    if cfg.prof_write {
+        std::fs::write(stem.with_extension("pro"), &out.pro)?;
+    }
     // The ledger (MASS_REPORT=LEDGER) is written here, not in main, so batch
     // mode carries it too.
     if let Some(mass) = &out.mass {
@@ -128,6 +132,9 @@ fn write_output(root: &Path, cfg: &RunConfig, out: &RunOutput) -> Result<()> {
     }
     if let Some(chan) = &out.chan_csv {
         std::fs::write(stem.with_extension("chan.csv"), chan)?;
+    }
+    if let Some(events) = &out.density_events {
+        std::fs::write(stem.with_extension("density-events.csv"), events)?;
     }
     Ok(())
 }

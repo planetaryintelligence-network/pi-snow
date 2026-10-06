@@ -53,12 +53,7 @@ pub fn budget(atm: &Atmosphere, params: &SurfaceParameters, phase: Phase) -> Bud
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RootScan {
-    pub sign_changes: usize,
-    pub decreasing_intervals: usize,
-    pub samples: Vec<(f64, f64)>,
-}
+pub use super::bare_scan::{Agreement, Certification, RootScan};
 
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostics {
@@ -66,6 +61,7 @@ pub struct Diagnostics {
     pub stiffness_lower_bound_w_m2_k: f64,
     pub maximum_sampled_budget_slope_w_m2_k: f64,
     pub scan: Option<RootScan>,
+    pub certification: Option<Certification>,
     pub column_solves: usize,
     pub budget_evaluations: usize,
     pub newton_iterations: usize,
@@ -74,7 +70,7 @@ pub struct Diagnostics {
 
 impl Diagnostics {
     pub fn multiple_roots(&self) -> bool {
-        self.scan.as_ref().is_some_and(|s| s.sign_changes > 1)
+        self.scan.as_ref().is_some_and(|s| s.roots.len() > 1)
     }
 }
 
@@ -121,40 +117,6 @@ pub fn pure_phase(temperature_k: f64) -> Phase {
     }
 }
 
-pub fn scan_residual(
-    mut residual: impl FnMut(f64) -> Result<f64, String>,
-    lo: f64,
-    hi: f64,
-) -> Result<RootScan, String> {
-    let mut scan = RootScan::default();
-    let mut previous_sign = 0_i8;
-    for i in 0..64 {
-        let q = lo + (hi - lo) * i as f64 / 63.0;
-        let r = residual(q)?;
-        if !r.is_finite() {
-            return Err("nonfinite bare-soil scan residual".into());
-        }
-        if let Some((_, old)) = scan.samples.last() {
-            scan.decreasing_intervals += usize::from(r < *old);
-        }
-        let sign = if r > 0.0 {
-            1
-        } else if r < 0.0 {
-            -1
-        } else {
-            0
-        };
-        if sign != 0 {
-            if previous_sign != 0 && sign != previous_sign {
-                scan.sign_changes += 1;
-            }
-            previous_sign = sign;
-        }
-        scan.samples.push((q, r));
-    }
-    Ok(scan)
-}
-
 /// Every trial reduces the simultaneous implicit soil rows from the same entry
 /// state. Failed attempts leave the caller unchanged and retain their counters.
 pub fn solve(
@@ -171,6 +133,9 @@ pub fn solve(
         }
         Err(message) => {
             diagnostics.nonconvergences = 1;
+            if let Some(scan) = &mut diagnostics.scan {
+                scan.assess(None);
+            }
             Err(Failure {
                 message,
                 diagnostics,
@@ -228,16 +193,27 @@ fn solve_inner(
     }
     diagnostics.stiffness_lower_bound_w_m2_k = lower;
     diagnostics.maximum_sampled_budget_slope_w_m2_k = maximum;
-    diagnostics.certified = maximum < lower;
+    let width = entry.material.water_kg_m3() * super::LATENT_J_KG * SoilColumn::node_volume(0) / dt;
+    diagnostics.budget_evaluations += 103;
+    let certificate = super::bare_scan::certify(balance, maximum, lower, width)?;
+    diagnostics.certified = !certificate.failed.iter().any(|f| *f);
     if !diagnostics.certified {
-        diagnostics.scan = Some(scan_residual(|q| Ok(trial(q, diagnostics)?.0), lo, hi)?);
+        let scan =
+            super::bare_scan::scan(&entry, dt, bottom, balance, lower, [lo, hi], &certificate)?;
+        diagnostics.column_solves += 1 + scan.resolve_solves;
+        diagnostics.budget_evaluations += 1301;
+        diagnostics.scan = Some(scan);
     }
+    diagnostics.certification = Some(certificate);
     diagnostics.budget_evaluations += 1;
     let mut q = balance(entry.phase(0)).clamp(lo, hi);
     for _ in 0..100 {
         diagnostics.newton_iterations += 1;
         let (residual, column, report) = trial(q, diagnostics)?;
         if residual.abs() <= 1e-6 {
+            if let Some(scan) = &mut diagnostics.scan {
+                scan.assess(Some(column.phase(0)));
+            }
             *soil = column;
             return Ok(BareReport {
                 soil: report,

@@ -2,6 +2,7 @@
 //! Soil stays separate from the native snow composition and bucket transport.
 
 pub mod bare;
+pub mod bare_scan;
 mod properties;
 mod solver;
 

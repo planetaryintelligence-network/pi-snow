@@ -58,45 +58,84 @@ fn bare_corner_fixture() -> (SoilColumn, f64) {
 }
 
 fn scan_bare_fixture(soil: &SoilColumn, balance: &impl Fn(Phase) -> f64) -> bare::RootScan {
-    let imposed = |temperature| {
-        soil.clone()
-            .step(600.0, Surface::Temperature(temperature), Bottom::Insulated)
-            .unwrap()
-            .top_flux_w_m2
-    };
-    bare::scan_residual(
-        |q| {
-            let mut trial = soil.clone();
-            trial.step(600.0, Surface::Flux(q), Bottom::Insulated)?;
-            Ok(q - balance(trial.phase(0)))
-        },
-        imposed(210.0),
-        imposed(340.0),
+    let imposed = |t| bare_scan::dirichlet(soil, 600.0, Bottom::Insulated, t).unwrap();
+    let lower = solver::surface_stiffness_lower_bound(soil, 600.0, Bottom::Insulated);
+    let width = soil.material.water_kg_m3() * LATENT_J_KG * SoilColumn::node_volume(0) / 600.0;
+    let certificate = bare_scan::certify(balance, 0.0, lower, width).unwrap();
+    bare_scan::scan(
+        soil,
+        600.0,
+        Bottom::Insulated,
+        balance,
+        lower,
+        [imposed(210.0), imposed(340.0)],
+        &certificate,
     )
     .unwrap()
 }
 
+fn assert_root_cells(scan: &bare::RootScan, expected: &[(bare_scan::Segment, f64, f64)]) {
+    assert_eq!(scan.roots.len(), expected.len());
+    for (root, &(segment, lo, hi)) in scan.roots.iter().zip(expected) {
+        assert_eq!(root.cells.len(), 1);
+        assert_eq!(root.cells[0].segment, segment);
+        assert_eq!(root.cells[0].lo, lo);
+        assert_eq!(root.cells[0].hi, hi);
+    }
+}
+
 #[test]
 fn bare_soil_weighted_phase_corners() {
-    for jump in [4.0, -4.0] {
+    use bare_scan::Segment::{Frozen, Plateau};
+    for (jump, exact_root) in [(4.0, 41.84656390635812), (-4.0, 45.62953441483138)] {
         let (mut soil, qa) = bare_corner_fixture();
         let balance = |p: Phase| {
             qa - jump / 2.0 - 10.0 * (p.temperature_k - FREEZING_K) + jump * p.liquid_fraction
         };
-        let scan = scan_bare_fixture(&soil, &balance);
+        let mut scan = scan_bare_fixture(&soil, &balance);
         let report = bare::solve(&mut soil, 600.0, Bottom::Insulated, balance).unwrap();
+        assert!(report.diagnostics.certified);
+        assert_eq!(
+            report.diagnostics.certification.as_ref().unwrap().failed,
+            [false; 3]
+        );
+        assert!(
+            report
+                .diagnostics
+                .certification
+                .as_ref()
+                .unwrap()
+                .jumps
+                .iter()
+                .all(|j| j.abs() <= bare_scan::TAU)
+        );
         assert!(report.flux_residual_w_m2.abs() <= 1e-6);
-        assert_eq!(scan.sign_changes, 1);
+        assert_eq!(
+            report.surface_flux_w_m2, exact_root,
+            "A4 must not change root selection"
+        );
+        let expected = if jump > 0.0 {
+            (Frozen, 273.1, FREEZING_K)
+        } else {
+            (Plateau, 0.0, 0.01)
+        };
+        assert_root_cells(&scan, &[expected]);
+        assert_eq!(scan.jump_crossings, [false; 2]);
+        scan.assess(Some(soil.phase(0)));
+        assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
         eprintln!(
-            "U8 weighted corner jump {jump}: qa {qa}, root {}, scan sign changes {}",
-            report.surface_flux_w_m2, scan.sign_changes
+            "U8 weighted corner jump {jump}: qa {qa}, root {}, roots {}, resolve solves {}",
+            report.surface_flux_w_m2,
+            scan.roots.len(),
+            scan.resolve_solves
         );
     }
 }
 
 #[test]
 fn bare_soil_discontinuous_evaporation_scan() {
-    let (soil, qa) = bare_corner_fixture();
+    use bare_scan::Segment::{Frozen, Plateau};
+    let (mut soil, qa) = bare_corner_fixture();
     let balance = |p: Phase| {
         qa - 2.0 - 10.0 * (p.temperature_k - FREEZING_K)
             + if p.temperature_k >= FREEZING_K {
@@ -105,25 +144,30 @@ fn bare_soil_discontinuous_evaporation_scan() {
                 0.0
             }
     };
-    let scan = scan_bare_fixture(&soil, &balance);
-    eprintln!(
-        "U8 switched evaporation full bracket {:?}..{:?}, sign changes {}, decreasing intervals {}, qa {qa}",
-        scan.samples.first(),
-        scan.samples.last(),
-        scan.sign_changes,
-        scan.decreasing_intervals
+    let report = bare::solve(&mut soil, 600.0, Bottom::Insulated, balance).unwrap();
+    let d = &report.diagnostics;
+    assert_eq!(
+        d.certification.as_ref().unwrap().failed,
+        [false, false, true]
     );
-    // A3.7(ii): the scan must identify the evaporating multiple-root case.
-    assert!(
-        scan.sign_changes > 1,
-        "registered scan missed the two continuous roots"
+    assert!((d.certification.as_ref().unwrap().jumps[0] - 4.0).abs() <= 1e-6);
+    assert!(d.multiple_roots());
+    let scan = d.scan.as_ref().unwrap();
+    assert_root_cells(scan, &[(Frozen, 273.1, FREEZING_K), (Plateau, 0.0, 0.01)]);
+    assert_eq!(scan.jump_crossings, [true, false]);
+    assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
+    eprintln!(
+        "U8 switched evaporation: qa {qa}, root {}, roots {}, resolve solves {}",
+        report.surface_flux_w_m2,
+        scan.roots.len(),
+        scan.resolve_solves
     );
 }
 
 #[test]
 fn bare_soil_discontinuous_condensation_refusal() {
     let (mut soil, qa) = bare_corner_fixture();
-    let before = soil.energy_j_m2();
+    let before = soil.clone();
     let balance = |p: Phase| {
         qa + 2.0
             - 10.0 * (p.temperature_k - FREEZING_K)
@@ -135,12 +179,25 @@ fn bare_soil_discontinuous_condensation_refusal() {
     };
     let failure = bare::solve(&mut soil, 600.0, Bottom::Insulated, balance).unwrap_err();
     assert_eq!(failure.diagnostics.nonconvergences, 1);
-    assert_eq!(soil.energy_j_m2(), before);
-    eprintln!("U8 switched condensation: {}", failure.message);
+    assert_eq!(soil.enthalpy, before.enthalpy);
+    assert_eq!(
+        failure.diagnostics.certification.as_ref().unwrap().failed,
+        [false, false, true]
+    );
+    assert!((failure.diagnostics.certification.as_ref().unwrap().jumps[0] + 4.0).abs() <= 1e-6);
+    let scan = failure.diagnostics.scan.as_ref().unwrap();
+    assert!(scan.roots.is_empty());
+    assert_eq!(scan.jump_crossings, [true, false]);
+    assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
+    eprintln!(
+        "U8 switched condensation: {}, roots 0, resolve solves {}",
+        failure.message, scan.resolve_solves
+    );
 }
 
 #[test]
 fn bare_soil_schur_slope_predicate() {
+    use bare_scan::Segment::Liquid;
     let mut soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
     let balance = |p: Phase| {
         let t = p.temperature_k;
@@ -156,37 +213,120 @@ fn bare_soil_schur_slope_predicate() {
     assert!(!report.diagnostics.certified);
     assert!(report.diagnostics.maximum_sampled_budget_slope_w_m2_k > 119.9);
     assert!(report.diagnostics.stiffness_lower_bound_w_m2_k < 120.0);
-    assert_eq!(report.diagnostics.scan.unwrap().samples.len(), 64);
+    assert_eq!(
+        report.diagnostics.certification.as_ref().unwrap().failed,
+        [true, false, false]
+    );
+    let scan = report.diagnostics.scan.as_ref().unwrap();
+    assert_root_cells(scan, &[(Liquid, 280.0, 280.0), (Liquid, 282.7, 282.8)]);
+    assert_eq!(scan.nodes.each_ref().map(|n| n.len()), [633, 101, 670]);
+    assert_eq!(scan.jump_crossings, [false; 2]);
+    assert!(report.diagnostics.multiple_roots());
+    assert!(report.surface_flux_w_m2.abs() <= 1e-6);
+    assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
+    eprintln!(
+        "U8 +120 slope: roots {}, resolve solves {}",
+        scan.roots.len(),
+        scan.resolve_solves
+    );
+}
+
+fn bare_bump(p: Phase) -> f64 {
+    let t = p.temperature_k;
+    -15.0 * (t - 280.0) + 1000.0 * (-(t - 290.0).powi(2)).exp()
 }
 
 #[test]
 fn bare_soil_bump_analytic_root_count() {
-    let soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
-    let balance = |p: Phase| {
-        let t = p.temperature_k;
-        -15.0 * (t - 280.0) + 1000.0 * (-(t - 290.0).powi(2)).exp()
-    };
+    use bare_scan::Segment::Liquid;
+    let mut soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
     let mut linear = soil.clone();
     linear
         .step(600.0, Surface::Flux(100.0), Bottom::Insulated)
         .unwrap();
     let stiffness = 100.0 / (linear.phase(0).temperature_k - 280.0);
-    let analytic_residual = |t| stiffness * (t - 280.0) - balance(bare::pure_phase(t));
+    let analytic_residual = |t| stiffness * (t - 280.0) - bare_bump(bare::pure_phase(t));
     assert!(analytic_residual(279.0) < 0.0 && analytic_residual(281.0) > 0.0);
     assert!(
         analytic_residual(289.0) > 0.0
             && analytic_residual(290.0) < 0.0
             && analytic_residual(291.0) > 0.0
     );
-    let scan = scan_bare_fixture(&soil, &balance);
-    eprintln!(
-        "U8 bump analytic roots 3, full-bracket scan sign changes {}, reduced stiffness {stiffness}",
-        scan.sign_changes
-    );
+    let report = bare::solve(&mut soil, 600.0, Bottom::Insulated, bare_bump).unwrap();
+    let scan = report.diagnostics.scan.as_ref().unwrap();
     assert_eq!(
-        scan.sign_changes, 3,
-        "registered scan must match the analytic root count"
+        report.diagnostics.certification.as_ref().unwrap().failed,
+        [true, false, false]
     );
+    assert_root_cells(
+        scan,
+        &[
+            (Liquid, 280.0, 280.0),
+            (Liquid, 289.8, 289.9),
+            (Liquid, 290.0, 290.1),
+        ],
+    );
+    assert_eq!(scan.jump_crossings, [false; 2]);
+    assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
+    for (lo, hi) in [(289.8, 289.9), (290.0, 290.1)] {
+        assert!(analytic_residual(lo) * analytic_residual(hi) < 0.0);
+    }
+    assert!(analytic_residual(280.0).abs() <= 1e-6);
+    eprintln!(
+        "U8 bump analytic roots 3, path scan roots {}, reduced stiffness {stiffness}, resolve solves {}",
+        scan.roots.len(),
+        scan.resolve_solves
+    );
+}
+
+#[test]
+fn bare_soil_envelope_soundness() {
+    let soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let scan = scan_bare_fixture(&soil, &bare_bump);
+    let mut checked = 0;
+    for node in scan.nodes[0].iter().chain(scan.nodes[2].iter()) {
+        if node.coordinate == FREEZING_K {
+            continue;
+        }
+        let q = bare_scan::dirichlet(&soil, 600.0, Bottom::Insulated, node.coordinate).unwrap();
+        assert_eq!(
+            node.sign,
+            Some(bare_scan::sign(q - node.budget)),
+            "envelope sign at {} K",
+            node.coordinate
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 1301);
+    eprintln!(
+        "U8 envelope: all {checked} node signs exact, resolve solves {}",
+        scan.resolve_solves
+    );
+}
+
+#[test]
+fn bare_soil_path_coordinate_identity() {
+    let (soil, qa) = bare_corner_fixture();
+    let width = soil.material.water_kg_m3() * LATENT_J_KG * SoilColumn::node_volume(0) / 600.0;
+    let qb = qa + width;
+    for f in [0.25, 0.5, 0.75] {
+        let mut column = soil.clone();
+        column
+            .step(
+                600.0,
+                Surface::Flux(qb - (1.0 - f) * width),
+                Bottom::Insulated,
+            )
+            .unwrap();
+        assert_eq!(column.phase(0).temperature_k, FREEZING_K);
+        assert!((column.phase(0).liquid_fraction - f).abs() <= 1e-9);
+    }
+    let q = bare_scan::dirichlet(&soil, 600.0, Bottom::Insulated, 272.0).unwrap();
+    let mut column = soil.clone();
+    column
+        .step(600.0, Surface::Flux(q), Bottom::Insulated)
+        .unwrap();
+    assert!((column.phase(0).temperature_k - 272.0).abs() <= 1e-8);
 }
 
 #[test]

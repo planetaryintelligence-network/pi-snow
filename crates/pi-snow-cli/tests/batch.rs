@@ -61,6 +61,26 @@ fn stage(root: &Path, name: &str, k: usize) -> PathBuf {
     unit
 }
 
+fn set_flag(unit: &Path, key: &str, value: &str) {
+    let path = unit.join("snowpack.ini");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let prefix = format!("{key} =");
+    let mut found = false;
+    let lines: Vec<_> = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with(&prefix) {
+                found = true;
+                format!("{key} = {value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    assert!(found, "fixture lacks {key}");
+    std::fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
 fn outputs(unit: &Path) -> Vec<Vec<u8>> {
     PRO_AND_SMET
         .iter()
@@ -189,4 +209,45 @@ fn a_list_file_gives_each_unit_its_own_end() {
     one_process_each(std::slice::from_ref(&reference), &[]);
     assert_eq!(outputs(&unit), outputs(&reference));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn false_output_flags_gate_their_files_and_acdd_header() {
+    let root = scratch("output-flags");
+    let cases = [
+        ("prof", "PROF_WRITE"),
+        ("ts", "TS_WRITE"),
+        ("acdd", "ACDD_WRITE"),
+    ];
+    for (name, key) in cases {
+        let unit = stage(&root, name, 1);
+        set_flag(&unit, key, "false");
+        let status = Command::new(env!("CARGO_BIN_EXE_pi-snow"))
+            .args(["-c", "snowpack.ini", "-e", END])
+            .current_dir(&unit)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{key}=false: {status}");
+
+        let stem = unit.join("output/ULAMB1_hrrr-terrain-v1");
+        let pro = stem.with_extension("pro");
+        let smet = stem.with_extension("smet");
+        match key {
+            "PROF_WRITE" => {
+                assert!(!pro.exists());
+                assert!(smet.is_file());
+            }
+            "TS_WRITE" => {
+                assert!(pro.is_file());
+                assert!(!smet.exists());
+            }
+            "ACDD_WRITE" => {
+                assert!(pro.is_file());
+                let text = std::fs::read_to_string(smet).unwrap();
+                assert!(!text.lines().any(|line| line.starts_with("creator_name")));
+            }
+            _ => unreachable!(),
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
 }

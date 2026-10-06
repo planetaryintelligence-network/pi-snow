@@ -62,6 +62,7 @@ pub enum DensityScheme {
     Pahaut,
     Zwart2007Eq51,
     Zwart,
+    Anderson1976,
 }
 
 impl DensityScheme {
@@ -86,6 +87,7 @@ impl DensityScheme {
                     + 0.30943402 * c.wind.max(2.0).log10();
                 10f64.powf(if ta < -14.0 { base } else { base - 0.35976206 })
             }
+            DensityScheme::Anderson1976 => 50.0 + 1.7 * (ta + 15.0).max(0.0).powf(1.5),
         }
     }
 }

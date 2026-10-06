@@ -92,6 +92,8 @@ pub enum SnowAlbedo {
     Vionnet2012,
     /// Aoki et al. (2003), Figure 6 and Table 2, temperature-rate aging.
     Aoki2003TempRate,
+    /// Chan et al. (2022) SLAIR with independent MERRA-2 impurity deposition.
+    Chan2022Merra2,
 }
 
 /// Growth of wet rounded grains.
@@ -143,6 +145,50 @@ pub enum ThinTopMerge {
     Clm4_010Mm,
 }
 
+/// Lower boundary treatment registered by engine-meltout-v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroundBoundary {
+    /// Prescribed forcing temperature (Phase 2).
+    #[default]
+    Phase2,
+    /// Prescribed `GEO_HEAT` flux into snow, W m-2.
+    GeoHeatFlux,
+}
+
+/// Whole-pack melt trigger registered by engine-meltout-v1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TotalMelt {
+    /// Layer phase change (Phase 2).
+    #[default]
+    Phase2,
+    /// Crocus v3.0.2 §2.4.15 Eq. 116 whole-pack energy condition.
+    CrocusEq116,
+}
+
+/// Fresh-snow density assigned to deposited solid precipitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FreshSnowDensity {
+    /// Phase 2 Pahaut/Vionnet form.
+    #[default]
+    Phase2,
+    /// Anderson (1976), reproduced by Lafaysse et al. (2026), Eq. 35.
+    A76Anderson1976,
+}
+
+/// Dry-layer viscosity selection for the density experiment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DrySettlement {
+    /// Phase 2 BR92 viscosity for every layer.
+    #[default]
+    Br92,
+    /// Teufelsbauer's dry-snow form, with wet layers retained at BR92.
+    T11,
+    /// Kojima's dry dendritic form, with other layers retained at BR92.
+    K75,
+    /// K75 on dry dendritic layers and T11 on other dry layers.
+    T11K75,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhysicsOptions {
     pub water_retention: WaterRetention,
@@ -156,6 +202,10 @@ pub struct PhysicsOptions {
     pub sublimation_melt_out: SublimationMeltOut,
     pub surface_linearisation: SurfaceLinearisation,
     pub thin_top_merge: ThinTopMerge,
+    pub ground_boundary: GroundBoundary,
+    pub total_melt: TotalMelt,
+    pub fresh_snow_density: FreshSnowDensity,
+    pub dry_settlement: DrySettlement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +275,7 @@ impl PhysicsOptions {
                 self.snow_albedo = match value {
                     "VIONNET2012" => SnowAlbedo::Vionnet2012,
                     "AOKI2003_TEMP_RATE" => SnowAlbedo::Aoki2003TempRate,
+                    "CHAN2022_MERRA2" => SnowAlbedo::Chan2022Merra2,
                     _ => return Err(bad()),
                 }
             }
@@ -242,6 +293,20 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            "GROUND_BOUNDARY" => {
+                self.ground_boundary = match value {
+                    "PHASE2" => GroundBoundary::Phase2,
+                    "GEO_HEAT_FLUX" => GroundBoundary::GeoHeatFlux,
+                    _ => return Err(bad()),
+                }
+            }
+            "TOTAL_MELT" => {
+                self.total_melt = match value {
+                    "PHASE2" => TotalMelt::Phase2,
+                    "CROCUS_EQ116" => TotalMelt::CrocusEq116,
+                    _ => return Err(bad()),
+                }
+            }
             "WET_GRAIN_GROWTH" => {
                 self.wet_grain_growth = match value {
                     "NONE" => WetGrainGrowth::None,
@@ -253,6 +318,22 @@ impl PhysicsOptions {
                 self.thin_top_merge = match value {
                     "PHASE2" => ThinTopMerge::Phase2,
                     "CLM4_010MM" => ThinTopMerge::Clm4_010Mm,
+                    _ => return Err(bad()),
+                }
+            }
+            "NEW_SNOW_DENSITY" => {
+                self.fresh_snow_density = match value {
+                    "PHASE2" => FreshSnowDensity::Phase2,
+                    "A76_ANDERSON1976" => FreshSnowDensity::A76Anderson1976,
+                    _ => return Err(bad()),
+                }
+            }
+            "DRY_SETTLEMENT" => {
+                self.dry_settlement = match value {
+                    "BR92" => DrySettlement::Br92,
+                    "T11" => DrySettlement::T11,
+                    "K75" => DrySettlement::K75,
+                    "T11_K75" => DrySettlement::T11K75,
                     _ => return Err(bad()),
                 }
             }
@@ -335,6 +416,8 @@ mod tests {
         assert!(PhysicsOptions::from_settings(["WET_GRAIN_GROWTH=YES"]).is_err());
         let o = PhysicsOptions::from_settings(["SNOW_ALBEDO=AOKI2003_TEMP_RATE"]).unwrap();
         assert_eq!(o.snow_albedo, SnowAlbedo::Aoki2003TempRate);
+        let o = PhysicsOptions::from_settings(["SNOW_ALBEDO=CHAN2022_MERRA2"]).unwrap();
+        assert_eq!(o.snow_albedo, SnowAlbedo::Chan2022Merra2);
         assert!(PhysicsOptions::from_settings(["SNOW_ALBEDO=UNKNOWN"]).is_err());
     }
 
@@ -357,6 +440,22 @@ mod tests {
             PhysicsOptions::from_settings(["TURBULENCE=FROM_INI"]).unwrap(),
             PhysicsOptions::default()
         );
+    }
+
+    #[test]
+    fn meltout_candidate_keys_parse_without_changing_other_options() {
+        let base = PhysicsOptions::default();
+        assert_eq!(
+            PhysicsOptions::from_settings(["GROUND_BOUNDARY=PHASE2", "TOTAL_MELT=PHASE2"]).unwrap(),
+            base
+        );
+        let flux = PhysicsOptions::from_settings(["GROUND_BOUNDARY=GEO_HEAT_FLUX"]).unwrap();
+        assert_eq!(flux.ground_boundary, GroundBoundary::GeoHeatFlux);
+        assert_eq!(flux.total_melt, TotalMelt::Phase2);
+        let melt = PhysicsOptions::from_settings(["TOTAL_MELT=CROCUS_EQ116"]).unwrap();
+        assert_eq!(melt.total_melt, TotalMelt::CrocusEq116);
+        assert!(PhysicsOptions::from_settings(["GROUND_BOUNDARY=FLUX"]).is_err());
+        assert!(PhysicsOptions::from_settings(["TOTAL_MELT=EQ116"]).is_err());
     }
 
     #[test]

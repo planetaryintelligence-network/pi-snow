@@ -38,6 +38,11 @@ pub fn optical_diameter(m: &Microstructure) -> f64 {
     }
 }
 
+/// Thickness-weighted optical diameter of the top 3 cm used by the S2 surface.
+pub fn surface_optical_diameter(column: &Column) -> f64 {
+    surface_properties(column).0
+}
+
 /// Where the shortwave went, W m^-2.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Shortwave {
@@ -122,6 +127,20 @@ pub fn shortwave_with_band_albedo(
         per_element,
         to_ground,
     }
+}
+
+/// Use a supplied visible band while retaining S2's other surface bands and
+/// Vionnet's three-band fractions and pack extinction.
+pub fn shortwave_with_visible_band(column: &Column, incoming: f64, visible: f64) -> Shortwave {
+    if column.elements.is_empty() {
+        return shortwave(column, incoming, P_CDP);
+    }
+    let (d_opt, _) = surface_properties(column);
+    let root = d_opt.sqrt();
+    let a2 = (0.9 - 15.4 * root).max(0.3);
+    let dp = d_opt.min(0.0023);
+    let a3 = 346.3 * dp - 32.31 * dp.sqrt() + 0.88;
+    shortwave_with_band_albedo(column, incoming, [visible, a2, a3])
 }
 
 /// Thickness-weighted optical diameter and age of the top `SURFACE_DEPTH`.

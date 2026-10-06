@@ -6,7 +6,7 @@
 //! numbers as if it had solved Richards' equation, and the comparison would be
 //! against physics nobody asked for.
 
-use pi_snow_io::ini::{Ini, NewSnowDensity, RunConfig, Stability};
+use pi_snow_io::ini::{ConfigError, Ini, NewSnowDensity, RunConfig, Stability};
 
 fn fixture() -> String {
     std::fs::read_to_string(concat!(
@@ -14,6 +14,43 @@ fn fixture() -> String {
         "/tests/fixtures/run_ULAMB1.ini"
     ))
     .unwrap()
+}
+
+fn set_flag(text: &str, key: &str, value: &str) -> String {
+    let prefix = format!("{key} =");
+    let mut found = false;
+    let lines: Vec<_> = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with(&prefix) {
+                found = true;
+                format!("{key} = {value}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    assert!(found, "fixture lacks {key}");
+    lines.join("\n") + "\n"
+}
+
+fn remove_flag(text: &str, key: &str) -> String {
+    let prefix = format!("{key} =");
+    let lines: Vec<_> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with(&prefix))
+        .collect();
+    lines.join("\n") + "\n"
+}
+
+fn flag(c: &RunConfig, key: &str) -> bool {
+    match key {
+        "PROF_WRITE" => c.prof_write,
+        "TS_WRITE" => c.ts_write,
+        "SNOW_WRITE" => c.snow_write,
+        "ACDD_WRITE" => c.acdd_write,
+        _ => panic!("unknown output flag {key}"),
+    }
 }
 
 /// The "uac" physics arm, built exactly as `terrain_snowpack.apply_uac_physics`
@@ -87,6 +124,48 @@ fn the_uac_arm_maps_to_richardson_zwart_and_a_fifteen_minute_step() {
     assert_eq!(c.step_seconds, 900.0);
     assert_eq!(c.stability, Stability::Richardson);
     assert_eq!(c.new_snow_density, NewSnowDensity::Zwart);
+}
+
+#[test]
+fn output_flags_use_reference_defaults_and_require_profile_switches() {
+    let all_true = RunConfig::from_ini(&Ini::parse(&fixture()).unwrap()).unwrap();
+    for key in ["PROF_WRITE", "TS_WRITE", "SNOW_WRITE", "ACDD_WRITE"] {
+        assert!(flag(&all_true, key), "{key}");
+    }
+
+    let mut absent_defaults = fixture();
+    absent_defaults = remove_flag(&absent_defaults, "SNOW_WRITE");
+    absent_defaults = remove_flag(&absent_defaults, "ACDD_WRITE");
+    let c = RunConfig::from_ini(&Ini::parse(&absent_defaults).unwrap()).unwrap();
+    assert!(c.snow_write);
+    assert!(!c.acdd_write);
+
+    for key in ["PROF_WRITE", "TS_WRITE"] {
+        let text = remove_flag(&fixture(), key);
+        assert!(matches!(
+            RunConfig::from_ini(&Ini::parse(&text).unwrap()),
+            Err(ConfigError::Missing { key: missing, .. }) if missing == key
+        ));
+    }
+}
+
+#[test]
+fn output_flags_accept_only_case_insensitive_true_or_false() {
+    for key in ["PROF_WRITE", "TS_WRITE", "SNOW_WRITE", "ACDD_WRITE"] {
+        let true_text = set_flag(&fixture(), key, "TRUE");
+        let c = RunConfig::from_ini(&Ini::parse(&true_text).unwrap()).unwrap();
+        assert!(flag(&c, key), "{key}");
+
+        let false_text = set_flag(&fixture(), key, "FALSE");
+        let c = RunConfig::from_ini(&Ini::parse(&false_text).unwrap()).unwrap();
+        assert!(!flag(&c, key), "{key}");
+
+        let bad_text = set_flag(&fixture(), key, "yes");
+        assert!(matches!(
+            RunConfig::from_ini(&Ini::parse(&bad_text).unwrap()),
+            Err(ConfigError::BadValue { key: bad, .. }) if bad == key
+        ));
+    }
 }
 
 #[test]

@@ -138,37 +138,31 @@ pub(super) fn step(
                 iterations: iteration + 1,
             });
         }
-        let derivative: [f64; 10] = std::array::from_fn(|i| {
-            soil.material
-                .phase(h[i] / SoilColumn::node_volume(i))
-                .dtemperature_denthalpy
-                / SoilColumn::node_volume(i)
-        });
-        let mut diagonal = [1.0; 10];
+        let mut diagonal = [0.0; 10];
         let mut lower = [0.0; 10];
         let mut upper = [0.0; 10];
-        for i in 0..9 {
-            diagonal[i] += dt * g[i] * derivative[i];
-            upper[i] -= dt * g[i] * derivative[i + 1];
-            diagonal[i + 1] += dt * g[i] * derivative[i + 1];
-            lower[i + 1] -= dt * g[i] * derivative[i];
-        }
-        if let Surface::Robin {
-            transfer_w_m2_k, ..
-        } = top
-        {
-            diagonal[0] += dt * transfer_w_m2_k * derivative[0];
-        }
-        if let Bottom::Deep { .. } = bottom {
-            diagonal[9] += dt * deep * derivative[9];
-        }
-        if let Surface::Temperature(_) = top {
-            diagonal[0] = 1.0;
-            upper[0] = 0.0;
+        // Phase-dependent conductivity also changes the residual while T(H)
+        // is flat. Include that derivative rather than using a frozen-K Jacobian.
+        for j in 0..10 {
+            let delta = (h[j].abs() * 1e-6).max(1.0);
+            let mut plus = h;
+            let mut minus = h;
+            plus[j] += delta;
+            minus[j] -= delta;
+            let (gp, bp) = conductances(soil, &plus);
+            let (gm, bm) = conductances(soil, &minus);
+            let (rp, _, _, _) = residual(soil, &old, &plus, dt, top, bottom, &gp, bp);
+            let (rm, _, _, _) = residual(soil, &old, &minus, dt, top, bottom, &gm, bm);
+            diagonal[j] = (rp[j] - rm[j]) / (2.0 * delta);
+            if j > 0 {
+                upper[j - 1] = (rp[j - 1] - rm[j - 1]) / (2.0 * delta);
+            }
+            if j < 9 {
+                lower[j + 1] = (rp[j + 1] - rm[j + 1]) / (2.0 * delta);
+            }
         }
         let direction = solve_tridiagonal(&lower, &diagonal, &upper, &r.map(|v| -v));
-        // Conductivity is updated outside the sharp T(H) Jacobian. A residual
-        // line search safeguards changes in both phase and conductivity.
+        // A residual line search safeguards changes in both phase and conductivity.
         let mut scale = 1.0;
         let mut accepted = false;
         for _ in 0..32 {

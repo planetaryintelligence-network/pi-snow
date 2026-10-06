@@ -36,6 +36,7 @@ const L_TSG: usize = 4;
 pub const ROW_ABSENT: i64 = i64::MIN;
 pub const FAIL_CRAZY: i32 = 1;
 pub const FAIL_OVERFLOW: i32 = 2;
+pub const FAIL_NONFINITE: i32 = 3;
 pub const BLOCK: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +57,7 @@ impl Precision {
         }
     }
 
-    fn is_f32(self) -> bool {
+    pub fn is_f32(self) -> bool {
         matches!(self, Precision::F32 | Precision::F32K)
     }
 

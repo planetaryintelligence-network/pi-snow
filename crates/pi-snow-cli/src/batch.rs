@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! pi-snow batch --jobs N [-e END] [--list FILE] [--report FILE]
-//!               [--physics KEY=VALUE]... [UNIT_DIR]...
+//!               [--physics KEY=VALUE]... [--merra2-deposition CSV] [UNIT_DIR]...
 //! ```
 //!
 //! A unit directory is laid out as `rust_engine_arm_season` stages it:
@@ -23,7 +23,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use pi_snow_core::PhysicsOptions;
 
-use crate::unit::{parse_end, parse_physics, run_unit};
+use crate::unit::{parse_end, parse_physics, run_unit_with_deposition};
+use pi_snow_physics::chan_albedo::DepositionSeries;
 
 /// The number of worker threads `run_batch` will start.
 pub fn effective_threads(jobs: usize, units: usize) -> usize {
@@ -58,6 +59,15 @@ pub struct UnitReport {
 
 /// Run `jobs` on `threads` threads, results in the order of `jobs`.
 pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<UnitReport> {
+    run_batch_with_deposition(jobs, physics, threads, None)
+}
+
+pub fn run_batch_with_deposition(
+    jobs: &[Job],
+    physics: &PhysicsOptions,
+    threads: usize,
+    merra2: Option<&DepositionSeries>,
+) -> Vec<UnitReport> {
     let next = AtomicUsize::new(0);
     let threads = effective_threads(threads, jobs.len());
     let mut done: Vec<(usize, UnitReport)> = std::thread::scope(|scope| {
@@ -72,7 +82,7 @@ pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             let Some(job) = jobs.get(i) else { break };
-                            let report = run_job(job, physics);
+                            let report = run_job(job, physics, merra2);
                             match &report.error {
                                 None => log(format_args!(
                                     "pi-snow batch: {} ok, {} steps in {:.3} s",
@@ -102,10 +112,12 @@ pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<
     done.into_iter().map(|(_, r)| r).collect()
 }
 
-fn run_job(job: &Job, physics: &PhysicsOptions) -> UnitReport {
+fn run_job(job: &Job, physics: &PhysicsOptions, merra2: Option<&DepositionSeries>) -> UnitReport {
     let ini = job.unit_dir.join("snowpack.ini");
     let started = std::time::Instant::now();
-    let outcome = catch_unwind(AssertUnwindSafe(|| run_unit(&ini, job.end, physics)));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        run_unit_with_deposition(&ini, job.end, physics, merra2)
+    }));
     let failed = |error: String| UnitReport {
         unit_dir: job.unit_dir.clone(),
         station_id: None,
@@ -179,6 +191,7 @@ pub fn report_json(reports: &[UnitReport], threads: usize, wall_seconds: f64) ->
 struct Args {
     jobs: usize,
     report: Option<PathBuf>,
+    merra2_deposition: Option<PathBuf>,
     units: Vec<Job>,
 }
 
@@ -187,6 +200,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
     let mut seen_jobs = false;
     let mut end: Option<DateTime<Utc>> = None;
     let mut report = None;
+    let mut merra2_deposition = None;
     let mut list = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut it = args.iter();
@@ -221,6 +235,15 @@ fn parse_args(args: &[String]) -> Result<Args> {
                 }
                 list = Some(path_value(value("--list")?, "--list")?);
             }
+            "--merra2-deposition" => {
+                if merra2_deposition.is_some() {
+                    bail!("--merra2-deposition given twice");
+                }
+                merra2_deposition = Some(path_value(
+                    value("--merra2-deposition")?,
+                    "--merra2-deposition",
+                )?);
+            }
             // `parse_physics` reads these from the whole argument list.
             "--physics" => {
                 value("--physics")?;
@@ -254,6 +277,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
     Ok(Args {
         jobs,
         report,
+        merra2_deposition,
         units,
     })
 }
@@ -292,7 +316,16 @@ pub fn main(args: &[String]) -> Result<()> {
     let physics = parse_physics(args)?;
     let parsed = parse_args(args)?;
     let started = std::time::Instant::now();
-    let reports = run_batch(&parsed.units, &physics, parsed.jobs);
+    let merra2 = parsed
+        .merra2_deposition
+        .as_ref()
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading MERRA-2 deposition CSV {}", path.display()))?;
+            DepositionSeries::from_csv(&text).map_err(anyhow::Error::msg)
+        })
+        .transpose()?;
+    let reports = run_batch_with_deposition(&parsed.units, &physics, parsed.jobs, merra2.as_ref());
     let wall = started.elapsed().as_secs_f64();
     if let Some(path) = &parsed.report {
         std::fs::write(

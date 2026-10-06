@@ -108,6 +108,76 @@ fn solve_tridiagonal(
     answer
 }
 
+fn coordinate_sweep(
+    soil: &SoilColumn,
+    old: &[f64; 10],
+    h: &mut [f64; 10],
+    dt: f64,
+    top: Surface,
+    bottom: Bottom,
+    g: &[f64; 9],
+    deep: f64,
+) {
+    for i in 0..10 {
+        if i == 0 {
+            if let Surface::Temperature(t) = top {
+                h[i] = soil.material.enthalpy_at_temperature(t) * SoilColumn::node_volume(i);
+                continue;
+            }
+        }
+        let mut a = 0.0;
+        let mut rhs = old[i];
+        for neighbor in [i.checked_sub(1), (i < 9).then_some(i + 1)]
+            .into_iter()
+            .flatten()
+        {
+            let conductance = g[i.min(neighbor)];
+            a += dt * conductance;
+            rhs += dt
+                * conductance
+                * soil
+                    .material
+                    .phase(h[neighbor] / SoilColumn::node_volume(neighbor))
+                    .temperature_k;
+        }
+        if i == 0 {
+            match top {
+                Surface::Flux(q) => rhs += dt * q,
+                Surface::Robin {
+                    transfer_w_m2_k,
+                    air_k,
+                } => {
+                    a += dt * transfer_w_m2_k;
+                    rhs += dt * transfer_w_m2_k * air_k;
+                }
+                Surface::Temperature(_) => unreachable!(),
+            }
+        }
+        if i == 9 {
+            match bottom {
+                Bottom::Deep { temperature_k } => {
+                    a += dt * deep;
+                    rhs += dt * deep * temperature_k;
+                }
+                Bottom::Geothermal005 => rhs += dt * 0.05,
+                Bottom::Insulated => {}
+            }
+        }
+        // Exact inverse of H + a*T(H), including the latent interval. This
+        // scalar monotone solve is the phase-corner fallback, with no smoothing.
+        let volume = SoilColumn::node_volume(i);
+        let latent = soil.material.water_kg_m3() * super::LATENT_J_KG * volume;
+        let reduced = rhs - a * super::FREEZING_K;
+        h[i] = if reduced < 0.0 {
+            reduced / (1.0 + a / (soil.material.capacity(0.0) * volume))
+        } else if reduced > latent {
+            latent + (reduced - latent) / (1.0 + a / (soil.material.capacity(1.0) * volume))
+        } else {
+            reduced
+        };
+    }
+}
+
 pub(super) fn step(
     soil: &mut SoilColumn,
     dt: f64,
@@ -142,25 +212,33 @@ pub(super) fn step(
                 iterations: iteration + 1,
             });
         }
-        let mut diagonal = [0.0; 10];
+        let derivative: [f64; 10] = std::array::from_fn(|i| {
+            soil.material
+                .phase(h[i] / SoilColumn::node_volume(i))
+                .dtemperature_denthalpy
+                / SoilColumn::node_volume(i)
+        });
+        let mut diagonal = [1.0; 10];
         let mut lower = [0.0; 10];
         let mut upper = [0.0; 10];
-        // Differentiate the implicit sharp T(H) map, with entry coefficients.
-        for j in 0..10 {
-            let delta = (h[j].abs() * 1e-6).max(1.0);
-            let mut plus = h;
-            let mut minus = h;
-            plus[j] += delta;
-            minus[j] -= delta;
-            let (rp, _, _, _) = residual(soil, &old, &plus, dt, top, bottom, &g, deep);
-            let (rm, _, _, _) = residual(soil, &old, &minus, dt, top, bottom, &g, deep);
-            diagonal[j] = (rp[j] - rm[j]) / (2.0 * delta);
-            if j > 0 {
-                upper[j - 1] = (rp[j - 1] - rm[j - 1]) / (2.0 * delta);
-            }
-            if j < 9 {
-                lower[j + 1] = (rp[j + 1] - rm[j + 1]) / (2.0 * delta);
-            }
+        for i in 0..9 {
+            diagonal[i] += dt * g[i] * derivative[i];
+            upper[i] -= dt * g[i] * derivative[i + 1];
+            diagonal[i + 1] += dt * g[i] * derivative[i + 1];
+            lower[i + 1] -= dt * g[i] * derivative[i];
+        }
+        if let Surface::Robin {
+            transfer_w_m2_k, ..
+        } = top
+        {
+            diagonal[0] += dt * transfer_w_m2_k * derivative[0];
+        }
+        if let Bottom::Deep { .. } = bottom {
+            diagonal[9] += dt * deep * derivative[9];
+        }
+        if let Surface::Temperature(_) = top {
+            diagonal[0] = 1.0;
+            upper[0] = 0.0;
         }
         let direction = solve_tridiagonal(&lower, &diagonal, &upper, &r.map(|v| -v));
         // A residual line search safeguards crossings of the phase corners.
@@ -178,7 +256,7 @@ pub(super) fn step(
             scale *= 0.5;
         }
         if !accepted {
-            return Err(format!("soil Newton line search failed at residual {norm}"));
+            coordinate_sweep(soil, &old, &mut h, dt, top, bottom, &g, deep);
         }
     }
     Err("soil nonlinear solve failed after 240 iterations".into())

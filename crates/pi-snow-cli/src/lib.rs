@@ -3,6 +3,7 @@
 //! interchangeable at the pipeline's existing seam (`_run_native`).
 
 pub mod batch;
+pub mod diagnostic;
 pub mod dirichlet_storage_diagnostic;
 pub mod engine;
 pub mod finite;

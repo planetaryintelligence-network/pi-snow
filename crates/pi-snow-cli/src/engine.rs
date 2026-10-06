@@ -42,17 +42,22 @@ use pi_snow_physics::new_snow::{self, Conditions, DensityScheme, Deposition};
 use pi_snow_physics::settlement::{self, Viscosity};
 use pi_snow_physics::solar;
 use pi_snow_physics::stability::{self, GrainClass, Layer};
-use pi_snow_physics::surface::{self, Atmosphere, SurfaceParameters};
+use pi_snow_physics::surface::{self, Atmosphere, Budget, SurfaceParameters};
+use pi_snow_physics::surface_diagnostic;
 use pi_snow_physics::surface_numerics;
 use pi_snow_physics::thermal::{self, Conductivity, Ground};
+use pi_snow_physics::thin_top_merge;
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
 use pi_snow_physics::wet_growth;
 
+use crate::diagnostic::{Collector, DiagnosticMode, Refusal, RunDiagnostics, StepTrace};
 use crate::dirichlet_storage_diagnostic::DirichletStorageDiagnostic;
 use crate::ledger::{Interval, Ledger};
 use crate::meltout_candidate::{self, MeltoutCandidateDiagnostic, PackState};
 use crate::meltout_diagnostic::MeltoutDiagnostic;
+
+mod trace_substep;
 
 /// Marker bits kept in `Microstructure::marker`.
 const MARK_REFROZEN: u16 = 1;
@@ -111,6 +116,7 @@ pub struct RunOutput {
     pub steps: usize,
     /// The mass ledger, under `MASS_REPORT=LEDGER` only.
     pub mass: Option<String>,
+    pub diagnostics: Option<RunDiagnostics>,
     /// Per-step Chan branches and daily SLAIR mass reconciliation, candidate only.
     pub chan_csv: Option<String>,
     /// Initial density and forcing conditions for newly deposited elements.
@@ -168,7 +174,31 @@ pub fn run_with_options(
     start: Column,
     end: DateTime<Utc>,
 ) -> Result<RunOutput, RunError> {
-    run_with_options_and_deposition(cfg, options, site, forcing, start, end, None)
+    run_with_options_and_diagnostics_and_deposition(
+        cfg, options, site, forcing, start, end, None, None,
+    )
+}
+
+/// The default entry point plus an explicit report-only collection mode.
+pub fn run_with_diagnostics(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    diagnostic_mode: Option<DiagnosticMode>,
+) -> Result<RunOutput, RunError> {
+    run_with_options_and_diagnostics_and_deposition(
+        cfg,
+        options,
+        site,
+        forcing,
+        start,
+        end,
+        diagnostic_mode,
+        None,
+    )
 }
 
 /// Run with the hourly independent MERRA-2 record required by the Chan arm.
@@ -179,6 +209,21 @@ pub fn run_with_options_and_deposition(
     forcing: &Smet,
     start: Column,
     end: DateTime<Utc>,
+    merra2: Option<&DepositionSeries>,
+) -> Result<RunOutput, RunError> {
+    run_with_options_and_diagnostics_and_deposition(
+        cfg, options, site, forcing, start, end, None, merra2,
+    )
+}
+
+fn run_with_options_and_diagnostics_and_deposition(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    diagnostic_mode: Option<DiagnosticMode>,
     merra2: Option<&DepositionSeries>,
 ) -> Result<RunOutput, RunError> {
     let field = |name: &'static str| {
@@ -280,6 +325,9 @@ pub fn run_with_options_and_deposition(
         .then(|| String::from("timestamp_utc,event,element,initial_density_kg_m3,element_mass_kg_m2,element_height_m,air_temp_c,surface_temp_c,relative_humidity,wind_m_s\n"));
     let mut density_event_number = 0usize;
     let mut interval = Interval::default();
+    let initial_time = forcing.rows.first().map_or(end, |r| r.timestamp);
+    let mut collector =
+        diagnostic_mode.map(|mode| Collector::new(mode, &column.node_temperature, initial_time));
     let mut meltout_diagnostic = std::env::var_os("PI_SNOW_MELTOUT_DIAGNOSTICS")
         .is_some_and(|value| value == "1")
         .then(MeltoutDiagnostic::new);
@@ -295,6 +343,7 @@ pub fn run_with_options_and_deposition(
          pro_text: String,
          steps: usize,
          ledger: Option<Ledger>,
+         diagnostics: Option<RunDiagnostics>,
          density_events: Option<String>,
          chan_csv: Option<String>,
          meltout_diagnostic: Option<String>,
@@ -314,6 +363,7 @@ pub fn run_with_options_and_deposition(
             pro: pro_text,
             steps,
             mass: ledger.map(Ledger::into_text),
+            diagnostics,
             density_events,
             chan_csv,
             meltout_diagnostic,
@@ -440,6 +490,20 @@ pub fn run_with_options_and_deposition(
             }
         }
 
+        if options.thin_top_merge == pi_snow_core::options::ThinTopMerge::Clm4_010Mm {
+            thin_top_merge::merge_top_once(&mut column, 0.010);
+        }
+
+        let mut trace_first_nonfinite_substep = None;
+        let mut trace_pre_thickness = Vec::new();
+        let mut trace_pre_grain_type = Vec::new();
+        let mut trace_pre_density = Vec::new();
+        let mut trace_pre_nodes = Vec::new();
+        let mut trace_post_solve_nodes = Vec::new();
+        let mut trace_sources = Vec::new();
+        let mut trace_surface_iterations = Vec::new();
+        let mut trace_shortwave = 0.0;
+
         let hs = column.snow_height();
         let params = SurfaceParameters {
             emissivity: surface::SNOW_EMISSIVITY,
@@ -448,6 +512,7 @@ pub fn run_with_options_and_deposition(
             z0: cfg.roughness_length,
             scheme,
         };
+        let trace_budget: Budget;
 
         let (budget, albedo_now, qg0) = if column.elements.is_empty() {
             let atm = Atmosphere {
@@ -511,6 +576,16 @@ pub fn run_with_options_and_deposition(
                 rain_rate,
             };
             // 4. Energy balance and conduction.
+            if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                trace_pre_thickness = column.elements.iter().map(|e| e.thickness).collect();
+                trace_pre_grain_type = layers(&column, options)
+                    .iter()
+                    .map(|l| l.grain_type)
+                    .collect();
+                trace_pre_density = column.elements.iter().map(Element::density).collect();
+                trace_pre_nodes = column.node_temperature.clone();
+                trace_sources = absorbed.per_element.clone();
+            }
             let before = thermal::internal_energy(&column);
             let pack_before = PackState::capture(&column);
             let t0_pre = column.node_temperature[0];
@@ -549,18 +624,49 @@ pub fn run_with_options_and_deposition(
                     SurfaceLinearisation::Phase2 => surface::step_general,
                     SurfaceLinearisation::RadiativeFloor => surface_numerics::step_general,
                 };
-                let b = step_surface(
-                    &mut column,
-                    &atm,
-                    &params,
-                    ground,
-                    &absorbed.per_element,
-                    dt,
-                    conductivity,
-                );
-                let ts = column.node_temperature.last().copied().unwrap_or(tsg);
-                (b, f64::NAN, f64::NAN, ts)
+                let b = if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                    let linearise = match options.surface_linearisation {
+                        SurfaceLinearisation::Phase2 => surface::linearise,
+                        SurfaceLinearisation::RadiativeFloor => surface_numerics::linearise,
+                    };
+                    surface_diagnostic::step_general(
+                        &mut column,
+                        &atm,
+                        &params,
+                        ground,
+                        &absorbed.per_element,
+                        dt,
+                        conductivity,
+                        linearise,
+                        |iteration| trace_surface_iterations.push(iteration),
+                    )
+                } else {
+                    step_surface(
+                        &mut column,
+                        &atm,
+                        &params,
+                        ground,
+                        &absorbed.per_element,
+                        dt,
+                        conductivity,
+                    )
+                };
+                if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                    trace_post_solve_nodes = column.node_temperature.clone();
+                    trace_shortwave = atm.absorbed_shortwave;
+                }
+                let surface_k = column.node_temperature.last().copied().unwrap_or(tsg);
+                (b, f64::NAN, f64::NAN, surface_k)
             };
+            trace_budget = b;
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "surface and conduction solve",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
             let sources: f64 = absorbed.per_element.iter().sum();
             let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
             let thermal_residual =
@@ -663,6 +769,14 @@ pub fn run_with_options_and_deposition(
             acc.runoff += pc.drained + runoff;
             interval.drained += pc.drained;
             interval.runoff += runoff;
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "phase change and water",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
             if chan_active {
                 daily_runoff += pc.drained + runoff;
             }
@@ -711,13 +825,28 @@ pub fn run_with_options_and_deposition(
             if chan_active {
                 daily_sublimation += (-vapour).max(0.0);
                 if vapour < 0.0 {
-                    // Clean vapor deposition is applied as snowfall in Eq. 1 order.
                     daily_clean_deposition += -vapour;
                 }
             }
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "sublimation or deposition",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 7. Settlement.
             settlement::step(&mut column, dt, density_settlement_viscosity(options));
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "settlement",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 8. Metamorphism and ageing.
             let temps = column.element_temperatures();
@@ -749,9 +878,25 @@ pub fn run_with_options_and_deposition(
                 );
                 e.age_days += dt / 86_400.0;
             }
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "metamorphism",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
 
             // 9. Merge thin elements; drop anything melted to nothing.
             new_snow::merge_thin_elements(&mut column, cfg.minimum_element_length);
+            trace_substep::capture_first_nonfinite(
+                &mut trace_first_nonfinite_substep,
+                diagnostic_mode,
+                "merge",
+                &column,
+                &trace_budget,
+                deposition.buffered(),
+            );
             if let Some(diagnostic) = meltout_candidate_diagnostic.as_mut() {
                 let end_mass = column.swe() + deposition.buffered() + column.surface_hoar_mass;
                 let step_runoff = (interval.runoff - interval_before.runoff)
@@ -827,31 +972,112 @@ pub fn run_with_options_and_deposition(
             (b, absorbed.albedo, qg0)
         };
 
-        for (node, &t_node) in column.node_temperature.iter().enumerate() {
-            if t_node < cfg.t_crazy_min || t_node > cfg.t_crazy_max {
-                return Err(RunError::Crazy {
-                    node,
+        let current_min = column
+            .node_temperature
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.is_finite())
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(node, value)| (node, *value));
+        let crazy = column
+            .node_temperature
+            .iter()
+            .enumerate()
+            .find(|(_, value)| **value < cfg.t_crazy_min || **value > cfg.t_crazy_max)
+            .map(|(node, value)| (node, *value));
+
+        if let Some(collector) = collector.as_mut() {
+            if crazy.is_none() {
+                collector.observe_minimum(t, steps, &column.node_temperature);
+            }
+            if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                collector.observe_trace(StepTrace {
+                    step: steps,
                     time: t,
-                    value: t_node,
-                    min: cfg.t_crazy_min,
-                    max: cfg.t_crazy_max,
-                    partial: Box::new(make_output(
-                        rows,
-                        pro_text,
-                        steps,
-                        ledger,
-                        density_events.clone(),
-                        chan_csv.clone(),
-                        meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
-                        dirichlet_storage_diagnostic
-                            .as_ref()
-                            .map(|d| d.clone().into_text()),
-                        meltout_candidate_diagnostic
-                            .as_ref()
-                            .map(|d| d.clone().into_text()),
-                    )),
+                    dt_seconds: dt,
+                    air_temperature_k: ta,
+                    relative_humidity: rh,
+                    wind_m_s: vw,
+                    incoming_shortwave_horizontal_w_m2: iswr,
+                    incoming_longwave_w_m2: ilwr,
+                    pressure_pa: pressure,
+                    ground_temperature_k: tsg,
+                    z_wind_m: params.z_wind,
+                    z_scalar_m: params.z_scalar,
+                    roughness_length_m: params.z0,
+                    min_node: current_min.map(|(node, _)| node),
+                    min_node_k: current_min.map(|(_, kelvin)| kelvin),
+                    snowfall_m: solid,
+                    rain_m: liquid,
+                    deposited_kg_m2: deposited,
+                    deposition_buffer_kg_m2: deposition.buffered(),
+                    shortwave_absorbed_w_m2: trace_shortwave,
+                    internal_sources_w_m2: trace_sources.clone(),
+                    budget: [
+                        budget.olwr,
+                        budget.lwr_net,
+                        budget.sensible,
+                        budget.latent,
+                        budget.rain,
+                        budget.vapour_mass,
+                        budget.total,
+                    ],
+                    inferred_ground_flux_w_m2: qg0,
+                    pre_solve_element_thickness_m: trace_pre_thickness.clone(),
+                    pre_solve_grain_type: trace_pre_grain_type.clone(),
+                    pre_solve_density_kg_m3: trace_pre_density.clone(),
+                    pre_solve_node_temperature_k: trace_pre_nodes.clone(),
+                    post_solve_node_temperature_k: trace_post_solve_nodes.clone(),
+                    post_step_element_thickness_m: column
+                        .elements
+                        .iter()
+                        .map(|e| e.thickness)
+                        .collect(),
+                    post_step_node_temperature_k: column.node_temperature.clone(),
+                    surface_iterations: trace_surface_iterations.clone(),
+                    first_nonfinite_substep: trace_first_nonfinite_substep.clone(),
                 });
             }
+        }
+        if let Some((node, t_node)) = crazy {
+            let diagnostics = if let Some(c) = collector.as_mut() {
+                c.report.refusal = Some(Refusal {
+                    kind: "T_CRAZY",
+                    kelvin: t_node,
+                    time: t,
+                    step: steps,
+                    node,
+                    detail: format!("outside [{}, {}] K", cfg.t_crazy_min, cfg.t_crazy_max),
+                });
+                c.observe_refusal();
+                Some(c.report.clone())
+            } else {
+                None
+            };
+            let partial = make_output(
+                rows.clone(),
+                pro_text.clone(),
+                steps,
+                ledger.take(),
+                diagnostics,
+                density_events.clone(),
+                chan_csv.clone(),
+                meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
+                dirichlet_storage_diagnostic
+                    .as_ref()
+                    .map(|d| d.clone().into_text()),
+                meltout_candidate_diagnostic
+                    .as_ref()
+                    .map(|d| d.clone().into_text()),
+            );
+            return Err(RunError::Crazy {
+                time: t,
+                value: t_node,
+                min: cfg.t_crazy_min,
+                max: cfg.t_crazy_max,
+                node,
+                partial: Box::new(partial),
+            });
         }
 
         if chan_active {
@@ -911,25 +1137,38 @@ pub fn run_with_options_and_deposition(
             })
             .flatten()
         {
+            if let Some(collector) = collector.as_mut() {
+                collector.report.refusal = Some(Refusal {
+                    kind: "NONFINITE",
+                    kelvin: f64::NAN,
+                    time: t,
+                    step: steps,
+                    node: usize::MAX,
+                    detail: field.clone(),
+                });
+                collector.observe_refusal();
+            }
+            let partial = make_output(
+                rows,
+                pro_text,
+                steps,
+                ledger.take(),
+                collector.as_ref().map(|c| c.report.clone()),
+                density_events.clone(),
+                chan_csv.clone(),
+                meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
+                dirichlet_storage_diagnostic
+                    .as_ref()
+                    .map(|d| d.clone().into_text()),
+                meltout_candidate_diagnostic
+                    .as_ref()
+                    .map(|d| d.clone().into_text()),
+            );
             return Err(RunError::NonFinite {
                 step: steps,
                 time: t,
                 field,
-                partial: Box::new(make_output(
-                    rows,
-                    pro_text,
-                    steps,
-                    ledger,
-                    density_events.clone(),
-                    chan_csv.clone(),
-                    meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
-                    dirichlet_storage_diagnostic
-                        .as_ref()
-                        .map(|d| d.clone().into_text()),
-                    meltout_candidate_diagnostic
-                        .as_ref()
-                        .map(|d| d.clone().into_text()),
-                )),
+                partial: Box::new(partial),
             });
         }
 
@@ -968,6 +1207,7 @@ pub fn run_with_options_and_deposition(
         pro_text,
         steps,
         ledger,
+        collector.map(|c| c.report),
         density_events,
         chan_csv,
         meltout_diagnostic.map(MeltoutDiagnostic::into_text),
@@ -1053,11 +1293,7 @@ fn output_row(
             .enumerate()
             .filter_map(|(i, x)| f(x).map(|v| (v, tops[i])))
             .fold((stability::INDEX_CAP, 0.0), |best, cur| {
-                if cur.0 < best.0 {
-                    cur
-                } else {
-                    best
-                }
+                if cur.0 < best.0 { cur } else { best }
             })
     };
     for (z, s, f) in [

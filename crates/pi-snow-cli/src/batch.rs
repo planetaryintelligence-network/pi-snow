@@ -23,7 +23,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use pi_snow_core::PhysicsOptions;
 
-use crate::unit::{parse_end, parse_physics, run_unit_with_deposition};
+use crate::diagnostic::{self, DiagnosticMode, Minimum, Refusal};
+use crate::engine::RunError;
+use crate::unit::{parse_end, parse_physics, run_unit_with_deposition, run_unit_with_diagnostics};
 use pi_snow_physics::chan_albedo::DepositionSeries;
 
 /// The number of worker threads `run_batch` will start.
@@ -55,17 +57,38 @@ pub struct UnitReport {
     pub seconds: f64,
     /// `None` when the unit ran to the end.
     pub error: Option<String>,
+    pub minimum: Option<Minimum>,
+    pub refusal: Option<Refusal>,
 }
 
 /// Run `jobs` on `threads` threads, results in the order of `jobs`.
 pub fn run_batch(jobs: &[Job], physics: &PhysicsOptions, threads: usize) -> Vec<UnitReport> {
-    run_batch_with_deposition(jobs, physics, threads, None)
+    run_batch_with_options(jobs, physics, threads, None, None)
+}
+
+pub fn run_batch_with_diagnostics(
+    jobs: &[Job],
+    physics: &PhysicsOptions,
+    threads: usize,
+    diagnostic_mode: Option<DiagnosticMode>,
+) -> Vec<UnitReport> {
+    run_batch_with_options(jobs, physics, threads, diagnostic_mode, None)
 }
 
 pub fn run_batch_with_deposition(
     jobs: &[Job],
     physics: &PhysicsOptions,
     threads: usize,
+    merra2: Option<&DepositionSeries>,
+) -> Vec<UnitReport> {
+    run_batch_with_options(jobs, physics, threads, None, merra2)
+}
+
+fn run_batch_with_options(
+    jobs: &[Job],
+    physics: &PhysicsOptions,
+    threads: usize,
+    diagnostic_mode: Option<DiagnosticMode>,
     merra2: Option<&DepositionSeries>,
 ) -> Vec<UnitReport> {
     let next = AtomicUsize::new(0);
@@ -82,7 +105,7 @@ pub fn run_batch_with_deposition(
                         loop {
                             let i = next.fetch_add(1, Ordering::Relaxed);
                             let Some(job) = jobs.get(i) else { break };
-                            let report = run_job(job, physics, merra2);
+                            let report = run_job(job, physics, diagnostic_mode, merra2);
                             match &report.error {
                                 None => log(format_args!(
                                     "pi-snow batch: {} ok, {} steps in {:.3} s",
@@ -112,11 +135,20 @@ pub fn run_batch_with_deposition(
     done.into_iter().map(|(_, r)| r).collect()
 }
 
-fn run_job(job: &Job, physics: &PhysicsOptions, merra2: Option<&DepositionSeries>) -> UnitReport {
+fn run_job(
+    job: &Job,
+    physics: &PhysicsOptions,
+    diagnostic_mode: Option<DiagnosticMode>,
+    merra2: Option<&DepositionSeries>,
+) -> UnitReport {
     let ini = job.unit_dir.join("snowpack.ini");
     let started = std::time::Instant::now();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        run_unit_with_deposition(&ini, job.end, physics, merra2)
+        if let Some(mode) = diagnostic_mode {
+            run_unit_with_diagnostics(&ini, job.end, physics, Some(mode))
+        } else {
+            run_unit_with_deposition(&ini, job.end, physics, merra2)
+        }
     }));
     let failed = |error: String| UnitReport {
         unit_dir: job.unit_dir.clone(),
@@ -124,6 +156,8 @@ fn run_job(job: &Job, physics: &PhysicsOptions, merra2: Option<&DepositionSeries
         steps: 0,
         seconds: started.elapsed().as_secs_f64(),
         error: Some(error),
+        minimum: None,
+        refusal: None,
     };
     match outcome {
         Ok(Ok(run)) => UnitReport {
@@ -132,8 +166,20 @@ fn run_job(job: &Job, physics: &PhysicsOptions, merra2: Option<&DepositionSeries
             steps: run.steps,
             seconds: run.seconds,
             error: None,
+            minimum: run.diagnostics.as_ref().and_then(|d| d.minimum),
+            refusal: run.diagnostics.as_ref().and_then(|d| d.refusal.clone()),
         },
-        Ok(Err(e)) => failed(format!("{e:#}")),
+        Ok(Err(e)) => {
+            let diag = e.downcast_ref::<RunError>().and_then(|error| match error {
+                RunError::Crazy { partial, .. } => partial.diagnostics.as_ref(),
+                RunError::NonFinite { partial, .. } => partial.diagnostics.as_ref(),
+                _ => None,
+            });
+            let mut report = failed(format!("{e:#}"));
+            report.minimum = diag.and_then(|d| d.minimum);
+            report.refusal = diag.and_then(|d| d.refusal.clone());
+            report
+        }
         Err(panic) => failed(match panic.downcast_ref::<String>() {
             Some(s) => format!("panic: {s}"),
             None => match panic.downcast_ref::<&str>() {
@@ -191,6 +237,7 @@ pub fn report_json(reports: &[UnitReport], threads: usize, wall_seconds: f64) ->
 struct Args {
     jobs: usize,
     report: Option<PathBuf>,
+    temperature_report: Option<PathBuf>,
     merra2_deposition: Option<PathBuf>,
     units: Vec<Job>,
 }
@@ -200,6 +247,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
     let mut seen_jobs = false;
     let mut end: Option<DateTime<Utc>> = None;
     let mut report = None;
+    let mut temperature_report = None;
     let mut merra2_deposition = None;
     let mut list = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -228,6 +276,15 @@ fn parse_args(args: &[String]) -> Result<Args> {
                     bail!("--report given twice");
                 }
                 report = Some(path_value(value("--report")?, "--report")?);
+            }
+            "--temperature-report" => {
+                if temperature_report.is_some() {
+                    bail!("--temperature-report given twice");
+                }
+                temperature_report = Some(path_value(
+                    value("--temperature-report")?,
+                    "--temperature-report",
+                )?);
             }
             "--list" => {
                 if list.is_some() {
@@ -277,6 +334,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
     Ok(Args {
         jobs,
         report,
+        temperature_report,
         merra2_deposition,
         units,
     })
@@ -316,6 +374,10 @@ pub fn main(args: &[String]) -> Result<()> {
     let physics = parse_physics(args)?;
     let parsed = parse_args(args)?;
     let started = std::time::Instant::now();
+    let diagnostic_mode = parsed
+        .temperature_report
+        .as_ref()
+        .map(|_| DiagnosticMode::Minimum);
     let merra2 = parsed
         .merra2_deposition
         .as_ref()
@@ -325,12 +387,30 @@ pub fn main(args: &[String]) -> Result<()> {
             DepositionSeries::from_csv(&text).map_err(anyhow::Error::msg)
         })
         .transpose()?;
-    let reports = run_batch_with_deposition(&parsed.units, &physics, parsed.jobs, merra2.as_ref());
+    if diagnostic_mode.is_some() && merra2.is_some() {
+        bail!("--temperature-report cannot be combined with --merra2-deposition");
+    }
+    let reports = if diagnostic_mode.is_some() {
+        run_batch_with_diagnostics(&parsed.units, &physics, parsed.jobs, diagnostic_mode)
+    } else {
+        run_batch_with_deposition(&parsed.units, &physics, parsed.jobs, merra2.as_ref())
+    };
     let wall = started.elapsed().as_secs_f64();
     if let Some(path) = &parsed.report {
         std::fs::write(
             path,
             report_json(
+                &reports,
+                effective_threads(parsed.jobs, reports.len()),
+                wall,
+            ),
+        )
+        .with_context(|| path.display().to_string())?;
+    }
+    if let Some(path) = &parsed.temperature_report {
+        std::fs::write(
+            path,
+            diagnostic::minimum_report_json(
                 &reports,
                 effective_threads(parsed.jobs, reports.len()),
                 wall,

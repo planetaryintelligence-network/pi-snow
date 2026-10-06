@@ -9,6 +9,10 @@ license.workspace = true
 name = "pi-snow"
 path = "src/main.rs"
 
+[[bin]]
+name = "engine-cold-crash-tracer"
+path = "src/bin/engine-cold-crash-tracer.rs"
+
 [dependencies]
 pi-snow-core.workspace = true
 pi-snow-io.workspace = true

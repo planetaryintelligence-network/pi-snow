@@ -14,7 +14,11 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use pi_snow_cli::unit::{parse_end, parse_physics, run_unit_with_deposition};
+use pi_snow_cli::diagnostic::{self, DiagnosticMode};
+use pi_snow_cli::engine::RunError;
+use pi_snow_cli::unit::{
+    parse_end, parse_physics, run_unit_with_deposition, run_unit_with_diagnostics,
+};
 use pi_snow_physics::chan_albedo::DepositionSeries;
 
 fn main() -> Result<()> {
@@ -32,6 +36,7 @@ fn main() -> Result<()> {
     let end_text = flag("-e").context("usage: pi-snow -c <ini> -e <end>")?;
     let end = parse_end(&end_text)?;
     let physics = parse_physics(&args[1..])?;
+    let trace_path = flag("--trace-report").map(PathBuf::from);
     let merra2 = flag("--merra2-deposition")
         .map(|path| {
             let text = std::fs::read_to_string(&path)
@@ -39,8 +44,40 @@ fn main() -> Result<()> {
             DepositionSeries::from_csv(&text).map_err(anyhow::Error::msg)
         })
         .transpose()?;
+    if trace_path.is_some() && merra2.is_some() {
+        anyhow::bail!("--trace-report cannot be combined with --merra2-deposition");
+    }
+    let outcome = if trace_path.is_some() {
+        run_unit_with_diagnostics(&ini_path, end, &physics, Some(DiagnosticMode::Trace))
+    } else {
+        run_unit_with_deposition(&ini_path, end, &physics, merra2.as_ref())
+    };
+    let run = match outcome {
+        Ok(run) => run,
+        Err(error) => {
+            if let Some(path) = &trace_path {
+                if let Some(diagnostics) = error.downcast_ref::<RunError>().and_then(|e| match e {
+                    RunError::Crazy { partial, .. } => partial.diagnostics.as_ref(),
+                    RunError::NonFinite { partial, .. } => partial.diagnostics.as_ref(),
+                    _ => None,
+                }) {
+                    let station = ini_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    std::fs::write(path, diagnostic::trace_jsonl(&station, diagnostics))?;
+                }
+            }
+            return Err(error);
+        }
+    };
+    if let Some(path) = &trace_path {
+        if let Some(diagnostics) = &run.diagnostics {
+            std::fs::write(path, diagnostic::trace_jsonl(&run.station_id, diagnostics))?;
+        }
+    }
 
-    let run = run_unit_with_deposition(&ini_path, end, &physics, merra2.as_ref())?;
     eprintln!(
         "pi-snow {}: {} steps for {} in {:.3} s",
         env!("CARGO_PKG_VERSION"),

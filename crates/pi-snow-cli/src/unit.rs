@@ -16,6 +16,7 @@ use pi_snow_io::smet::Smet;
 use pi_snow_io::sno::SnoFile;
 use pi_snow_physics::chan_albedo::DepositionSeries;
 
+use crate::diagnostic::{DiagnosticMode, RunDiagnostics};
 use crate::engine::{self, RunError, RunOutput, Site};
 
 /// What one finished column reports.
@@ -23,6 +24,7 @@ pub struct UnitRun {
     pub station_id: String,
     pub steps: usize,
     pub seconds: f64,
+    pub diagnostics: Option<RunDiagnostics>,
 }
 
 pub fn parse_end(text: &str) -> Result<DateTime<Utc>> {
@@ -47,7 +49,16 @@ pub fn parse_physics(args: &[String]) -> Result<PhysicsOptions> {
 }
 
 pub fn run_unit(ini_path: &Path, end: DateTime<Utc>, physics: &PhysicsOptions) -> Result<UnitRun> {
-    run_unit_with_deposition(ini_path, end, physics, None)
+    run_unit_with_options(ini_path, end, physics, None, None)
+}
+
+pub fn run_unit_with_diagnostics(
+    ini_path: &Path,
+    end: DateTime<Utc>,
+    physics: &PhysicsOptions,
+    diagnostic_mode: Option<DiagnosticMode>,
+) -> Result<UnitRun> {
+    run_unit_with_options(ini_path, end, physics, diagnostic_mode, None)
 }
 
 pub fn run_unit_with_deposition(
@@ -56,6 +67,19 @@ pub fn run_unit_with_deposition(
     physics: &PhysicsOptions,
     merra2: Option<&DepositionSeries>,
 ) -> Result<UnitRun> {
+    run_unit_with_options(ini_path, end, physics, None, merra2)
+}
+
+fn run_unit_with_options(
+    ini_path: &Path,
+    end: DateTime<Utc>,
+    physics: &PhysicsOptions,
+    diagnostic_mode: Option<DiagnosticMode>,
+    merra2: Option<&DepositionSeries>,
+) -> Result<UnitRun> {
+    if diagnostic_mode.is_some() && merra2.is_some() {
+        bail!("diagnostics cannot be combined with MERRA-2 deposition");
+    }
     let root = ini_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let cfg = RunConfig::from_ini(&Ini::parse(
         &std::fs::read_to_string(ini_path).with_context(|| ini_path.display().to_string())?,
@@ -90,15 +114,28 @@ pub fn run_unit_with_deposition(
     };
 
     let started = std::time::Instant::now();
-    let out = match engine::run_with_options_and_deposition(
-        &cfg,
-        physics,
-        &site,
-        &forcing,
-        sno.to_column(),
-        end,
-        merra2,
-    ) {
+    let run = if let Some(mode) = diagnostic_mode {
+        engine::run_with_diagnostics(
+            &cfg,
+            physics,
+            &site,
+            &forcing,
+            sno.to_column(),
+            end,
+            Some(mode),
+        )
+    } else {
+        engine::run_with_options_and_deposition(
+            &cfg,
+            physics,
+            &site,
+            &forcing,
+            sno.to_column(),
+            end,
+            merra2,
+        )
+    };
+    let out = match run {
         Ok(out) => out,
         Err(error) => {
             if let RunError::Crazy { partial, .. } | RunError::NonFinite { partial, .. } = &error {
@@ -112,6 +149,7 @@ pub fn run_unit_with_deposition(
         station_id: cfg.station_id,
         steps: out.steps,
         seconds: started.elapsed().as_secs_f64(),
+        diagnostics: out.diagnostics,
     })
 }
 

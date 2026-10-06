@@ -46,6 +46,26 @@ pub(super) fn conductances(soil: &SoilColumn, h: &[f64; 10]) -> ([f64; 9], f64) 
     (links, conductivity[9] / 7.0)
 }
 
+pub(super) fn surface_stiffness_lower_bound(soil: &SoilColumn, dt: f64, bottom: Bottom) -> f64 {
+    let (g, deep) = conductances(soil, &soil.enthalpy);
+    let capacity = soil.material.capacity(0.0).min(soil.material.capacity(1.0));
+    let mut diagonal: [f64; 10] =
+        std::array::from_fn(|i| capacity * SoilColumn::node_volume(i) / dt);
+    for i in 0..9 {
+        diagonal[i] += g[i];
+        diagonal[i + 1] += g[i];
+    }
+    if matches!(bottom, Bottom::Deep { .. }) {
+        diagonal[9] += deep;
+    }
+    // Eliminate the lower column into the surface row, 1/(A^-1)[0,0].
+    let mut reduced = diagonal[9];
+    for i in (0..9).rev() {
+        reduced = diagonal[i] - g[i] * g[i] / reduced;
+    }
+    reduced
+}
+
 fn residual(
     soil: &SoilColumn,
     old: &[f64; 10],

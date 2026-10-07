@@ -1150,6 +1150,9 @@ fn soil_engine_dispatch_bare_snow_and_replayed_state() {
         assert_eq!(data.output.rows.len(), 2);
         assert!(data.maximum_row_ledger_residual_j_m2 <= 1e-3);
         assert!(data.runtime.ledger_residual_j_m2().abs() <= 1e-3);
+        assert_eq!(data.maximum_relative_soil_water_change, 0.0);
+        assert_eq!(data.phase_complementarity_failures, 0);
+        assert_eq!(data.runtime.counters.bare_consistency_failures, 0);
         assert_eq!(data.runtime.counters.bare_rows > 0, bare);
         assert_eq!(data.runtime.counters.snow_rows > 0, !bare);
         assert!(

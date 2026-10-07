@@ -112,14 +112,21 @@ pub struct Data {
     pub runtime: super::runtime::Runtime,
     pub output: Rows,
     pub maximum_row_ledger_residual_j_m2: f64,
+    pub maximum_relative_soil_water_change: f64,
+    pub phase_complementarity_failures: usize,
+    initial_water_kg_m2: [f64; 9],
 }
 
 impl Data {
     pub fn new(runtime: super::runtime::Runtime) -> Self {
+        let initial_water_kg_m2 = runtime.column.layer_water_kg_m2();
         Self {
             runtime,
             output: Rows::default(),
             maximum_row_ledger_residual_j_m2: 0.0,
+            maximum_relative_soil_water_change: 0.0,
+            phase_complementarity_failures: 0,
+            initial_water_kg_m2,
         }
     }
 
@@ -137,6 +144,30 @@ impl Data {
         let bottom = after[2] - before[2];
         let residual = (after[0] - before[0] - top + bottom).abs();
         self.maximum_row_ledger_residual_j_m2 = self.maximum_row_ledger_residual_j_m2.max(residual);
+        for (now, before) in self
+            .runtime
+            .column
+            .layer_water_kg_m2()
+            .into_iter()
+            .zip(self.initial_water_kg_m2)
+        {
+            self.maximum_relative_soil_water_change = self
+                .maximum_relative_soil_water_change
+                .max(((now - before) / before).abs());
+        }
+        for i in 0..10 {
+            let phase = self.runtime.column.phase(i);
+            let t = phase.temperature_k;
+            let liquid = phase.liquid_fraction;
+            self.phase_complementarity_failures += usize::from(
+                !t.is_finite()
+                    || !liquid.is_finite()
+                    || !(0.0..=1.0).contains(&liquid)
+                    || (t > super::FREEZING_K && liquid != 1.0)
+                    || (t < super::FREEZING_K && liquid != 0.0)
+                    || (liquid > 0.0 && liquid < 1.0 && (t - super::FREEZING_K).abs() > 1e-9),
+            );
+        }
         self.output.accumulate(dt, top, bottom);
     }
 
@@ -174,7 +205,7 @@ impl Data {
         let extended = self.output.extend_smet(native);
         let c = &self.runtime.counters;
         let metadata = format!(
-            "soil_bare_rows = {}\nsoil_snow_rows = {}\nsoil_certified_rows = {}\nsoil_uncertified_rows = {}\nsoil_predicate_not_computed_rows = {}\nsoil_multiple_roots = {}\nsoil_nonconvergences = {}\nsoil_newton_iterations = {}\nsoil_column_solves = {}\nsoil_budget_evaluations = {}\nsoil_bare_turbulence_calls = {}\nsoil_scan_resolve_solves = {}\nsoil_bare_seconds = {:.9}\nsoil_snow_seconds = {:.9}\nsoil_initial_graft_j_m2 = {:.9}\nsoil_max_row_ledger_residual_j_m2 = {:.9}\nsoil_max_bare_consistency_w_m2 = {:.9}\nsoil_bare_consistency_failures = {}\nsoil_max_coupled_ledger_residual_j_m2 = {:.9}\nsoil_max_phase_ledger_residual_j_m2 = {:.9}\n",
+            "soil_bare_rows = {}\nsoil_snow_rows = {}\nsoil_certified_rows = {}\nsoil_uncertified_rows = {}\nsoil_predicate_not_computed_rows = {}\nsoil_multiple_roots = {}\nsoil_nonconvergences = {}\nsoil_newton_iterations = {}\nsoil_column_solves = {}\nsoil_budget_evaluations = {}\nsoil_bare_turbulence_calls = {}\nsoil_scan_resolve_solves = {}\nsoil_bare_seconds = {:.9}\nsoil_snow_seconds = {:.9}\nsoil_initial_graft_j_m2 = {:.9}\nsoil_max_row_ledger_residual_j_m2 = {:.9}\nsoil_max_bare_consistency_w_m2 = {:.9}\nsoil_bare_consistency_failures = {}\nsoil_max_coupled_ledger_residual_j_m2 = {:.9}\nsoil_max_phase_ledger_residual_j_m2 = {:.9}\nsoil_max_relative_water_change = {:.17e}\nsoil_phase_complementarity_failures = {}\n",
             c.bare_rows,
             c.snow_rows,
             c.certified_rows,
@@ -194,7 +225,9 @@ impl Data {
             c.maximum_bare_consistency_w_m2,
             c.bare_consistency_failures,
             c.maximum_coupled_ledger_residual_j_m2,
-            c.maximum_phase_ledger_residual_j_m2
+            c.maximum_phase_ledger_residual_j_m2,
+            self.maximum_relative_soil_water_change,
+            self.phase_complementarity_failures
         );
         extended.replacen("[DATA]\n", &(metadata + "[DATA]\n"), 1)
     }

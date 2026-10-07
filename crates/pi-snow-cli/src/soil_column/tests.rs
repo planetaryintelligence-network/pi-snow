@@ -1076,4 +1076,20 @@ fn soil_runtime_bare_transfer_and_cost_counters() {
         snow.node_temperature[0],
         state.column.phase(0).temperature_k
     );
+    let before = (state.column.temperatures(), state.column.energy_j_m2());
+    assert!(
+        state
+            .bare_step(&mut snow, 0.0, &atmosphere, &parameters)
+            .is_err()
+    );
+    assert_eq!(
+        (state.column.temperatures(), state.column.energy_j_m2()),
+        before
+    );
+    assert_eq!(state.counters.predicate_not_computed_rows, 1);
+    assert_eq!(state.counters.nonconvergences, 1);
+    assert_eq!(
+        state.counters.certified_rows + state.counters.uncertified_rows,
+        1
+    );
 }

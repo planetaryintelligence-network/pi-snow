@@ -17,6 +17,9 @@ pub struct Row {
     pub timestamp: DateTime<Utc>,
     /// Temperatures in kelvin, enthalpy in J m-2, downward fluxes in W m-2.
     pub values: [f64; 7],
+    pub temperature_k: [f64; 10],
+    pub enthalpy_j_m2: [f64; 10],
+    pub liquid_fraction: [f64; 10],
 }
 
 #[derive(Debug, Default, Clone)]
@@ -47,6 +50,9 @@ impl Rows {
                 self.interval_top_j_m2 / self.interval_seconds,
                 self.interval_bottom_j_m2 / self.interval_seconds,
             ],
+            temperature_k: soil.temperatures(),
+            enthalpy_j_m2: soil.enthalpy,
+            liquid_fraction: std::array::from_fn(|i| soil.phase(i).liquid_fraction),
         });
         self.interval_seconds = 0.0;
         self.interval_top_j_m2 = 0.0;
@@ -97,5 +103,99 @@ impl Rows {
         }
         assert_eq!(index, self.rows.len(), "extra soil output rows");
         result
+    }
+}
+
+/// Hourly physical state and aggregate diagnostics, never station substep rows.
+#[derive(Debug, Clone)]
+pub struct Data {
+    pub runtime: super::runtime::Runtime,
+    pub output: Rows,
+    pub maximum_row_ledger_residual_j_m2: f64,
+}
+
+impl Data {
+    pub fn new(runtime: super::runtime::Runtime) -> Self {
+        Self {
+            runtime,
+            output: Rows::default(),
+            maximum_row_ledger_residual_j_m2: 0.0,
+        }
+    }
+
+    pub fn snapshot(&self) -> [f64; 3] {
+        [
+            self.runtime.column.energy_j_m2(),
+            self.runtime.top_energy_j_m2,
+            self.runtime.bottom_energy_j_m2,
+        ]
+    }
+
+    pub fn finish_step(&mut self, dt: f64, before: [f64; 3]) {
+        let after = self.snapshot();
+        let top = after[1] - before[1];
+        let bottom = after[2] - before[2];
+        let residual = (after[0] - before[0] - top + bottom).abs();
+        self.maximum_row_ledger_residual_j_m2 = self.maximum_row_ledger_residual_j_m2.max(residual);
+        self.output.accumulate(dt, top, bottom);
+    }
+
+    /// Offset IDs distinguish soil nodes from the native snow node indices.
+    pub fn crazy_temperature(&self, min: f64, max: f64) -> Option<(usize, f64)> {
+        self.runtime
+            .column
+            .temperatures()
+            .into_iter()
+            .enumerate()
+            .find(|(_, t)| *t < min || *t > max)
+            .map(|(i, t)| (usize::MAX - i, t))
+    }
+
+    pub fn nonfinite(&self) -> Option<String> {
+        self.runtime
+            .column
+            .enthalpy
+            .iter()
+            .enumerate()
+            .find(|(_, h)| !h.is_finite())
+            .map(|(i, _)| format!("soil.enthalpy[{i}]"))
+            .or_else(|| {
+                self.runtime
+                    .column
+                    .temperatures()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, t)| !t.is_finite())
+                    .map(|(i, _)| format!("soil.temperature[{i}]"))
+            })
+    }
+
+    pub fn extend_smet(&self, native: &str) -> String {
+        let extended = self.output.extend_smet(native);
+        let c = &self.runtime.counters;
+        let metadata = format!(
+            "soil_bare_rows = {}\nsoil_snow_rows = {}\nsoil_certified_rows = {}\nsoil_uncertified_rows = {}\nsoil_predicate_not_computed_rows = {}\nsoil_multiple_roots = {}\nsoil_nonconvergences = {}\nsoil_newton_iterations = {}\nsoil_column_solves = {}\nsoil_budget_evaluations = {}\nsoil_bare_turbulence_calls = {}\nsoil_scan_resolve_solves = {}\nsoil_bare_seconds = {:.9}\nsoil_snow_seconds = {:.9}\nsoil_initial_graft_j_m2 = {:.9}\nsoil_max_row_ledger_residual_j_m2 = {:.9}\nsoil_max_bare_consistency_w_m2 = {:.9}\nsoil_bare_consistency_failures = {}\nsoil_max_coupled_ledger_residual_j_m2 = {:.9}\nsoil_max_phase_ledger_residual_j_m2 = {:.9}\n",
+            c.bare_rows,
+            c.snow_rows,
+            c.certified_rows,
+            c.uncertified_rows,
+            c.predicate_not_computed_rows,
+            c.multiple_roots,
+            c.nonconvergences,
+            c.newton_iterations,
+            c.column_solves,
+            c.budget_evaluations,
+            c.bare_turbulence_calls,
+            c.scan_resolve_solves,
+            c.bare_seconds,
+            c.snow_seconds,
+            self.runtime.initial_graft_j_m2,
+            self.maximum_row_ledger_residual_j_m2,
+            c.maximum_bare_consistency_w_m2,
+            c.bare_consistency_failures,
+            c.maximum_coupled_ledger_residual_j_m2,
+            c.maximum_phase_ledger_residual_j_m2
+        );
+        extended.replacen("[DATA]\n", &(metadata + "[DATA]\n"), 1)
     }
 }

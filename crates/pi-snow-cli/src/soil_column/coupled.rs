@@ -123,12 +123,39 @@ pub fn step(
     ground_shortwave: f64,
     conductivity: Conductivity,
 ) -> Result<(Budget, CoupledReport), String> {
+    step_with_linearisation(
+        snow,
+        soil,
+        dt,
+        bottom,
+        atm,
+        parameters,
+        sources,
+        ground_shortwave,
+        conductivity,
+        surface::linearise,
+    )
+}
+
+/// Preserve the run's existing snow surface-linearisation option.
+pub fn step_with_linearisation(
+    snow: &mut Column,
+    soil: &mut SoilColumn,
+    dt: f64,
+    bottom: Bottom,
+    atm: &Atmosphere,
+    parameters: &SurfaceParameters,
+    sources: &[f64],
+    ground_shortwave: f64,
+    conductivity: Conductivity,
+    linearise: fn(&Atmosphere, &SurfaceParameters, f64) -> (f64, f64),
+) -> Result<(Budget, CoupledReport), String> {
     let entry_snow = snow.clone();
     let entry_soil = soil.clone();
     let mut t_linear = *snow.node_temperature.last().ok_or("no surface node")?;
     let mut final_result = None;
     for _ in 0..3 {
-        let (a, b) = surface::linearise(atm, parameters, t_linear);
+        let (a, b) = linearise(atm, parameters, t_linear);
         let mut trial_snow = entry_snow.clone();
         let mut trial_soil = entry_soil.clone();
         let report = linear_step(

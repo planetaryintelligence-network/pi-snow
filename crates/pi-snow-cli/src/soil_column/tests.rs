@@ -1093,3 +1093,138 @@ fn soil_runtime_bare_transfer_and_cost_counters() {
         1
     );
 }
+
+fn engine_soil_fixture() -> (
+    pi_snow_io::ini::RunConfig,
+    crate::engine::Site,
+    pi_snow_io::smet::Smet,
+) {
+    let cfg = pi_snow_io::ini::RunConfig::from_ini(
+        &pi_snow_io::ini::Ini::parse(include_str!(
+            "../../../pi-snow-io/tests/fixtures/run_ULAMB1.ini"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let site = crate::engine::Site {
+        station_id: "SOIL_UNIT".into(),
+        station_name: "soil unit test".into(),
+        latitude: 40.0,
+        longitude: -111.0,
+        altitude: 2500.0,
+        slope_angle: 0.0,
+        slope_azimuth: 0.0,
+        soil_albedo: 0.09,
+    };
+    let forcing = pi_snow_io::smet::Smet::parse(
+        "SMET 1.1 ASCII\n[HEADER]\nsoil_mean_336h_k = 280\nfields = timestamp TA RH VW DW ISWR ILWR PSUM TSG\n[DATA]\n2025-10-01T00:00 280 0.6 2 0 0 310 0 273.15\n2025-10-01T00:10 280 0.6 2 0 0 310 0 273.15\n2025-10-01T01:00 280 0.6 2 0 0 310 0 273.15\n"
+    ).unwrap();
+    (cfg, site, forcing)
+}
+
+fn engine_soil_options() -> pi_snow_core::PhysicsOptions {
+    pi_snow_core::PhysicsOptions::from_settings([
+        "GROUND_BOUNDARY=SOIL_COLUMN",
+        "SOIL_PROPERTIES=MOIST_LOAM",
+        "SOIL_BOTTOM=DEEP_TBOT_8M",
+        "SOIL_TBOT_K=280",
+        "SOIL_INIT=AIR_PROFILE",
+    ])
+    .unwrap()
+}
+
+#[test]
+fn soil_engine_dispatch_bare_snow_and_replayed_state() {
+    let (cfg, site, forcing) = engine_soil_fixture();
+    let options = engine_soil_options();
+    let end = forcing.rows.last().unwrap().timestamp;
+    for snow in [
+        pi_snow_core::Column::bare_ground(FREEZING_K, 0.0, 0.0),
+        coupled_test_snow(0.1, FREEZING_K - 1.0),
+    ] {
+        let bare = snow.elements.is_empty();
+        let out =
+            crate::engine::run_with_options(&cfg, &options, &site, &forcing, snow.clone(), end)
+                .unwrap();
+        let data = out.soil.unwrap();
+        assert_eq!(data.output.rows.len(), 2);
+        assert!(data.maximum_row_ledger_residual_j_m2 <= 1e-3);
+        assert!(data.runtime.ledger_residual_j_m2().abs() <= 1e-3);
+        assert_eq!(data.runtime.counters.bare_rows > 0, bare);
+        assert_eq!(data.runtime.counters.snow_rows > 0, !bare);
+        assert!(
+            out.smet
+                .contains("TSOIL_005 TSOIL_010 TSOIL_020 TSOIL_050 SOIL_H G_SNOW_SOIL G_BOT")
+        );
+        assert!(out.smet.contains("soil_max_row_ledger_residual_j_m2 ="));
+        let mut without_mean = forcing.clone();
+        without_mean.header.remove("soil_mean_336h_k");
+        let replay = crate::engine::run_with_soil_state(
+            &cfg,
+            &options,
+            &site,
+            &without_mean,
+            snow,
+            end,
+            None,
+            SoilColumn::air_profile(Material::MoistLoam, 280.0, 280.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(out.smet, replay.smet);
+        assert_eq!(out.pro, replay.pro);
+    }
+}
+
+#[test]
+fn soil_engine_requires_bound_initialization_history() {
+    let (cfg, site, mut forcing) = engine_soil_fixture();
+    let options = engine_soil_options();
+    forcing.header.remove("soil_mean_336h_k");
+    let error = crate::engine::run_with_options(
+        &cfg,
+        &options,
+        &site,
+        &forcing,
+        pi_snow_core::Column::bare_ground(FREEZING_K, 0.0, 0.0),
+        forcing.rows.last().unwrap().timestamp,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::engine::RunError::IncompatiblePhysics(_)
+    ));
+    assert!(error.to_string().contains("soil_mean_336h_k"));
+}
+
+#[test]
+fn soil_engine_solver_stop_retains_completed_intervals() {
+    let (cfg, site, mut forcing) = engine_soil_fixture();
+    let i = forcing.field_index("ILWR").unwrap();
+    forcing.rows[2].values[i] = Some(10000.0);
+    let error = crate::engine::run_with_options(
+        &cfg,
+        &engine_soil_options(),
+        &site,
+        &forcing,
+        pi_snow_core::Column::bare_ground(FREEZING_K, 0.0, 0.0),
+        forcing.rows.last().unwrap().timestamp,
+    )
+    .unwrap_err();
+    let crate::engine::RunError::SoilSolver {
+        step,
+        time,
+        partial,
+        ..
+    } = error
+    else {
+        panic!("unexpected soil stop: {error}");
+    };
+    assert_eq!(step, 2);
+    assert_eq!(time, forcing.rows[2].timestamp);
+    let data = partial.soil.unwrap();
+    assert_eq!(data.output.rows.len(), 1);
+    assert_eq!(data.output.rows[0].timestamp, forcing.rows[1].timestamp);
+    assert!(partial.smet.contains("2025-10-01T00:10"));
+    assert!(!partial.smet.contains("2025-10-01T01:00"));
+    assert_eq!(data.runtime.counters.nonconvergences, 1);
+}

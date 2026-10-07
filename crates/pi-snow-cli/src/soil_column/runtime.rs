@@ -17,6 +17,40 @@ pub struct InitializationContext {
     pub annual_mean_k: f64,
 }
 
+impl InitializationContext {
+    pub fn from_forcing(
+        settings: Settings,
+        forcing: &pi_snow_io::smet::Smet,
+    ) -> Result<Self, &'static str> {
+        let air = settings.initialization == Some(soil::Initialization::AirProfile);
+        let mean = if air {
+            Some(
+                forcing
+                    .header
+                    .get("soil_mean_336h_k")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|v| v.is_finite())
+                    .ok_or(
+                        "AIR_PROFILE requires the runner-bound soil_mean_336h_k forcing header",
+                    )?,
+            )
+        } else {
+            None
+        };
+        let annual_mean_k = match settings.tbot_k() {
+            Some(t) => t,
+            None if air => {
+                return Err("AIR_PROFILE requires SOIL_TBOT_K for its annual-mean profile");
+            }
+            None => FREEZING_K, // Unused by the uniform geothermal initialization.
+        };
+        Ok(Self {
+            mean_336h_k: mean,
+            annual_mean_k,
+        })
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Counters {
     pub bare_seconds: f64,
@@ -34,6 +68,10 @@ pub struct Counters {
     pub budget_evaluations: usize,
     pub bare_turbulence_calls: usize,
     pub scan_resolve_solves: usize,
+    pub maximum_bare_consistency_w_m2: f64,
+    pub bare_consistency_failures: usize,
+    pub maximum_coupled_ledger_residual_j_m2: f64,
+    pub maximum_phase_ledger_residual_j_m2: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +118,35 @@ impl Runtime {
                 SoilColumn::air_profile(material, tbot, mean, settings.offset_k())
             }
         };
+        Self::graft(column, bottom, snow)
+    }
+
+    pub fn from_column(
+        settings: Settings,
+        column: SoilColumn,
+        snow: &mut Column,
+    ) -> Result<Self, String> {
+        settings.validate(true, false)?;
+        let expected = match settings.properties.unwrap() {
+            soil::Properties::MoistLoam => Material::MoistLoam,
+            soil::Properties::DryLoam => Material::DryLoam,
+        };
+        if column.material != expected
+            || column.temperatures().iter().any(|v| !v.is_finite())
+            || !column.energy_j_m2().is_finite()
+        {
+            return Err("invalid or incompatible replayed soil state".into());
+        }
+        let bottom = match settings.bottom.unwrap() {
+            soil::Bottom::DeepTbot8m => Bottom::Deep {
+                temperature_k: settings.tbot_k().unwrap(),
+            },
+            soil::Bottom::Geothermal005 => Bottom::Geothermal005,
+        };
+        Self::graft(column, bottom, snow)
+    }
+
+    fn graft(column: SoilColumn, bottom: Bottom, snow: &mut Column) -> Result<Self, String> {
         // Existing SNO soil rows do not define this registered column.
         let n = snow.soil_elements;
         if n > snow.elements.len() || !snow.is_well_formed() {
@@ -150,6 +217,11 @@ impl Runtime {
         self.counters.budget_evaluations += 1;
         self.counters.bare_turbulence_calls += 2;
         let mut budget = bare::budget(atmosphere, &parameters, self.column.phase(0));
+        let difference = (budget.total - report.surface_flux_w_m2).abs();
+        self.counters.maximum_bare_consistency_w_m2 =
+            self.counters.maximum_bare_consistency_w_m2.max(difference);
+        self.counters.bare_consistency_failures +=
+            usize::from(difference > 20.0_f64.max(0.05 * budget.total.abs()));
         budget.total = report.surface_flux_w_m2;
         Ok(budget)
     }
@@ -163,8 +235,17 @@ impl Runtime {
         sources: &[f64],
         ground_shortwave: f64,
         conductivity: Conductivity,
+        linearisation: pi_snow_core::options::SurfaceLinearisation,
     ) -> Result<Budget, String> {
-        let (budget, report) = coupled::step(
+        let linearise = match linearisation {
+            pi_snow_core::options::SurfaceLinearisation::Phase2 => {
+                pi_snow_physics::surface::linearise
+            }
+            pi_snow_core::options::SurfaceLinearisation::RadiativeFloor => {
+                pi_snow_physics::surface_numerics::linearise
+            }
+        };
+        let (budget, report) = coupled::step_with_linearisation(
             snow,
             &mut self.column,
             dt,
@@ -174,7 +255,12 @@ impl Runtime {
             sources,
             ground_shortwave,
             conductivity,
+            linearise,
         )?;
+        self.counters.maximum_coupled_ledger_residual_j_m2 = self
+            .counters
+            .maximum_coupled_ledger_residual_j_m2
+            .max(report.combined_ledger_residual_j_m2.abs());
         self.counters.snow_rows += 1;
         self.counters.snow_seconds += dt;
         self.top_energy_j_m2 += dt * report.soil.top_flux_w_m2;
@@ -187,6 +273,10 @@ impl Runtime {
         snow: &mut Column,
     ) -> Result<pi_snow_physics::water::PhaseChange, String> {
         let report = phase::phase_change(snow, &mut self.column)?;
+        self.counters.maximum_phase_ledger_residual_j_m2 = self
+            .counters
+            .maximum_phase_ledger_residual_j_m2
+            .max(report.combined_ledger_residual_j_m2.abs());
         self.top_energy_j_m2 += report.soil_exchange_j_m2;
         Ok(report.snow)
     }

@@ -83,6 +83,14 @@ pub enum RunError {
     IncompatiblePhysics(&'static str),
     #[error("MERRA-2 deposition is missing for snow-covered step at {time}")]
     MissingDeposition { time: DateTime<Utc> },
+    /// Soil numerical failure is a separate registered stop class.
+    #[error("soil solver failure at time step {step} ({time}): {message}")]
+    SoilSolver {
+        step: usize,
+        time: DateTime<Utc>,
+        message: String,
+        partial: Box<RunOutput>,
+    },
     /// A NaN or infinity in the state or checked surface budget while the
     /// column holds snow. `partial` contains output through the last completed
     /// output interval; `step` counts forcing steps from 1.

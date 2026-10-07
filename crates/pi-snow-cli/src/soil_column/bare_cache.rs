@@ -2,7 +2,10 @@
 use super::bare_scan::Certification;
 use pi_snow_physics::surface::{Atmosphere, SurfaceParameters};
 use pi_snow_physics::turbulence::Scheme;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug, Default, Clone)]
 pub struct Samples {
@@ -17,11 +20,11 @@ pub struct PredicateCache {
 }
 
 /// Owned by one unit-season's runner and shared only by its soil arms.
-pub type Shared = Rc<RefCell<PredicateCache>>;
+pub type Shared = Arc<Mutex<PredicateCache>>;
 
 impl PredicateCache {
     pub fn shared() -> Shared {
-        Rc::new(RefCell::new(Self::default()))
+        Arc::new(Mutex::new(Self::default()))
     }
 
     pub(super) fn row(

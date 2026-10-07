@@ -1,8 +1,8 @@
 //! Soil state, initialization context and cumulative counters for keyed runs.
-use super::{Bottom, FREEZING_K, Material, SoilColumn, bare, coupled, phase};
+use super::{bare, coupled, phase, Bottom, Material, SoilColumn, FREEZING_K};
 use pi_snow_core::{
-    Column,
     options::soil::{self, Settings},
+    Column,
 };
 use pi_snow_physics::{
     surface::{Atmosphere, Budget, SurfaceParameters},
@@ -262,7 +262,7 @@ impl Runtime {
         let result = if let Some(cache) = &self.predicate_cache {
             let stamp =
                 stamp.ok_or("shared predicate cache requires a bound forcing-row timestamp")?;
-            let mut cache = cache.borrow_mut();
+            let mut cache = cache.lock().map_err(|_| "predicate cache lock poisoned")?;
             bare::solve_with_samples(
                 &mut self.column,
                 dt,

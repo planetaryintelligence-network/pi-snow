@@ -138,7 +138,9 @@ fn run_unit_with_options(
     let out = match run {
         Ok(out) => out,
         Err(error) => {
-            if let RunError::Crazy { partial, .. } | RunError::NonFinite { partial, .. } = &error {
+            if let RunError::Crazy { partial, .. }
+                | RunError::NonFinite { partial, .. }
+                | RunError::SoilSolver { partial, .. } = &error {
                 write_output(&root, &cfg, partial)?;
             }
             return Err(error.into());

@@ -3,6 +3,7 @@
 
 pub mod bare;
 pub mod bare_scan;
+pub mod coupled;
 mod properties;
 mod solver;
 

@@ -610,3 +610,88 @@ fn soil_water_fixed() {
         }
     }
 }
+
+fn coupled_test_snow(thickness: f64, temperature: f64) -> pi_snow_core::Column {
+    let profile = pi_snow_io::sno::SnoFile::parse(include_str!(
+        "../../../pi-snow-io/tests/fixtures/layered_CLN2.sno"
+    ))
+    .unwrap();
+    let mut column = profile.to_column();
+    column.elements.truncate(1);
+    column.elements[0].thickness = thickness;
+    column.elements[0].composition = pi_snow_core::Composition::dry_snow(250.0);
+    column.node_temperature = vec![temperature; 2];
+    column
+}
+
+#[test]
+fn interface_series_conductance() {
+    use pi_snow_physics::thermal::Conductivity;
+    let mut soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let mut snow = coupled_test_snow(0.03, 280.0);
+    let conductivity = Conductivity::Yen1981;
+    let k_snow = conductivity.of_density(snow.elements[0].density());
+    let k_soil = soil.material.conductivity(280.0, 1.0);
+    let q = 0.5;
+    for (i, depth) in DEPTHS_M.into_iter().enumerate() {
+        soil.enthalpy[i] = soil
+            .material
+            .enthalpy_at_temperature(280.0 - q * depth / k_soil)
+            * SoilColumn::node_volume(i);
+    }
+    snow.node_temperature[1] = 280.0 + q * snow.elements[0].thickness / k_snow;
+    let surface = snow.node_temperature[1];
+    let bottom = Bottom::Deep {
+        temperature_k: 280.0 - q * 8.0 / k_soil,
+    };
+    let report = coupled::linear_step(
+        &mut snow,
+        &mut soil,
+        600.0,
+        bottom,
+        q + 15.0 * surface,
+        -15.0,
+        &[0.0],
+        0.0,
+        conductivity,
+    )
+    .unwrap();
+    let snow_center = 0.5 * (snow.node_temperature[0] + snow.node_temperature[1]);
+    let soil_center = 0.5 * (soil.phase(0).temperature_k + soil.phase(1).temperature_k);
+    let series_flux = (snow_center - soil_center)
+        / (snow.elements[0].thickness / (2.0 * k_snow)
+            + (DEPTHS_M[1] - DEPTHS_M[0]) / (2.0 * k_soil));
+    assert!((series_flux - q).abs() <= 1e-10);
+    assert!((report.soil.top_flux_w_m2 - series_flux).abs() <= 1e-10);
+    assert!(report.combined_ledger_residual_j_m2.abs() <= 1e-3);
+}
+
+#[test]
+fn coupled_thermal_ledger_and_shared_node() {
+    use pi_snow_physics::thermal::Conductivity;
+    for thickness in [4e-9, 1e-6, 0.03] {
+        for temperature in [268.15, FREEZING_K, 278.15] {
+            let mut soil = SoilColumn::uniform(Material::MoistLoam, temperature);
+            let mut snow = coupled_test_snow(thickness, temperature);
+            let report = coupled::linear_step(
+                &mut snow,
+                &mut soil,
+                600.0,
+                Bottom::Geothermal005,
+                15.0 * FREEZING_K + 80.0,
+                -15.0,
+                &[12.0],
+                3.0,
+                Conductivity::Yen1981,
+            )
+            .unwrap();
+            assert_eq!(snow.node_temperature[0], soil.phase(0).temperature_k);
+            assert!(
+                report.combined_ledger_residual_j_m2.abs() <= 1e-3,
+                "h={thickness}, T={temperature}, residual={}",
+                report.combined_ledger_residual_j_m2
+            );
+            assert!(report.soil.ledger_residual_j_m2.abs() <= 1e-3);
+        }
+    }
+}

@@ -1020,3 +1020,60 @@ fn soil_shared_node_reconciles_native_merge_energy() {
     assert_eq!(snow.node_temperature[0], soil.phase(0).temperature_k);
     assert!(thermal::internal_energy(&snow).is_finite());
 }
+
+#[test]
+fn soil_runtime_bare_transfer_and_cost_counters() {
+    use pi_snow_core::{Column, PhysicsOptions};
+    use pi_snow_physics::{
+        surface::{Atmosphere, SurfaceParameters},
+        turbulence::Scheme,
+    };
+    let settings = PhysicsOptions::from_settings([
+        "GROUND_BOUNDARY=SOIL_COLUMN",
+        "SOIL_PROPERTIES=MOIST_LOAM",
+        "SOIL_BOTTOM=GEOTHERMAL_005",
+        "SOIL_INIT=UNIFORM_TMELT",
+    ])
+    .unwrap()
+    .soil;
+    let mut snow = Column::bare_ground(273.15, 0.0, 0.0);
+    let context = runtime::InitializationContext {
+        mean_336h_k: None,
+        annual_mean_k: 280.0,
+    };
+    let mut state = runtime::Runtime::new(settings, context, &mut snow).unwrap();
+    let atmosphere = Atmosphere {
+        t_air: 285.0,
+        relative_humidity: 0.7,
+        wind: 2.0,
+        absorbed_shortwave: 200.0,
+        ilwr: 350.0,
+        pressure: 80000.0,
+        rain_rate: 0.0,
+    };
+    let parameters = SurfaceParameters {
+        emissivity: 0.97,
+        z_wind: 2.0,
+        z_scalar: 2.0,
+        z0: 0.01,
+        scheme: Scheme::Louis,
+    };
+    let budget = state
+        .bare_step(&mut snow, 600.0, &atmosphere, &parameters)
+        .unwrap();
+    assert_eq!(state.counters.bare_rows, 1);
+    assert_eq!(state.counters.bare_seconds, 600.0);
+    assert_eq!(
+        state.counters.bare_turbulence_calls,
+        2 * state.counters.budget_evaluations
+    );
+    // Certification, bracket trials, entry balance, Newton acceptance and final budget.
+    assert!(state.counters.budget_evaluations >= 2705 + 2 + 1 + 1 + 1);
+    assert!(state.ledger_residual_j_m2().abs() <= 1e-3);
+    assert!((state.bottom_energy_j_m2 + 30.0).abs() <= 1e-12);
+    assert!((state.top_energy_j_m2 - budget.total * 600.0).abs() <= 1e-3);
+    assert_eq!(
+        snow.node_temperature[0],
+        state.column.phase(0).temperature_k
+    );
+}

@@ -29,7 +29,9 @@ pub struct Counters {
     pub nonconvergences: usize,
     pub newton_iterations: usize,
     pub column_solves: usize,
+    /// Bare budget calls, including the final output budget.
     pub budget_evaluations: usize,
+    pub bare_turbulence_calls: usize,
     pub scan_resolve_solves: usize,
 }
 
@@ -108,6 +110,7 @@ impl Runtime {
         self.counters.newton_iterations += diagnostics.newton_iterations;
         self.counters.column_solves += diagnostics.column_solves;
         self.counters.budget_evaluations += diagnostics.budget_evaluations;
+        self.counters.bare_turbulence_calls += 2 * diagnostics.budget_evaluations;
         self.counters.scan_resolve_solves +=
             diagnostics.scan.as_ref().map_or(0, |s| s.resolve_solves);
     }
@@ -139,6 +142,8 @@ impl Runtime {
         self.top_energy_j_m2 += dt * report.soil.top_flux_w_m2;
         self.bottom_energy_j_m2 += dt * report.soil.bottom_flux_w_m2;
         snow.node_temperature[0] = self.column.phase(0).temperature_k;
+        self.counters.budget_evaluations += 1;
+        self.counters.bare_turbulence_calls += 2;
         let mut budget = bare::budget(atmosphere, &parameters, self.column.phase(0));
         budget.total = report.surface_flux_w_m2;
         Ok(budget)

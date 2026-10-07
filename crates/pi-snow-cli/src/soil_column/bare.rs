@@ -64,6 +64,7 @@ pub struct Diagnostics {
     pub certification: Option<Certification>,
     pub column_solves: usize,
     pub budget_evaluations: usize,
+    pub computed_budget_evaluations: usize,
     pub newton_iterations: usize,
     pub nonconvergences: usize,
 }
@@ -125,8 +126,25 @@ pub fn solve(
     bottom: Bottom,
     balance: impl Fn(Phase) -> f64,
 ) -> Result<BareReport, Failure> {
+    solve_with_samples(soil, dt, bottom, balance, None)
+}
+
+pub(super) fn solve_with_samples(
+    soil: &mut SoilColumn,
+    dt: f64,
+    bottom: Bottom,
+    balance: impl Fn(Phase) -> f64,
+    samples: Option<&mut super::bare_cache::Samples>,
+) -> Result<BareReport, Failure> {
     let mut diagnostics = Diagnostics::default();
-    match solve_inner(soil, dt, bottom, &balance, &mut diagnostics) {
+    let computed = std::cell::Cell::new(0);
+    let counted = |p| {
+        computed.set(computed.get() + 1);
+        balance(p)
+    };
+    let result = solve_inner(soil, dt, bottom, &counted, &mut diagnostics, samples);
+    diagnostics.computed_budget_evaluations = computed.get();
+    match result {
         Ok(mut report) => {
             report.diagnostics = diagnostics;
             Ok(report)
@@ -150,6 +168,7 @@ fn solve_inner(
     bottom: Bottom,
     balance: &impl Fn(Phase) -> f64,
     diagnostics: &mut Diagnostics,
+    mut samples: Option<&mut super::bare_cache::Samples>,
 ) -> Result<BareReport, String> {
     let entry = soil.clone();
     let trial = |q: f64, d: &mut Diagnostics| -> Result<(f64, SoilColumn, StepReport), String> {
@@ -175,31 +194,69 @@ fn solve_inner(
         return Err("bare-soil balance has no bracket in [210,340] K".into());
     }
     let lower = super::solver::surface_stiffness_lower_bound(&entry, dt, bottom);
-    let mut maximum = f64::NEG_INFINITY;
-    for i in 0..=1300 {
-        let t = 210.0 + 0.1 * i as f64;
-        // Pure-branch differences never straddle the freezing temperature.
-        let (a, b) = if t < FREEZING_K {
-            (t - 0.01, (t + 0.01).min(FREEZING_K - 1e-9))
-        } else {
-            ((t - 0.01).max(FREEZING_K + 1e-9), t + 0.01)
-        };
-        diagnostics.budget_evaluations += 2;
-        let slope = (balance(pure_phase(b)) - balance(pure_phase(a))) / (b - a);
-        if !slope.is_finite() {
-            return Err("nonfinite bare-soil sampled slope".into());
+    let maximum = if let Some(value) = samples.as_ref().and_then(|s| s.maximum_slope) {
+        diagnostics.budget_evaluations += 2602;
+        value
+    } else {
+        let mut maximum = f64::NEG_INFINITY;
+        for i in 0..=1300 {
+            let t = 210.0 + 0.1 * i as f64;
+            // Pure-branch differences never straddle the freezing temperature.
+            let (a, b) = if t < FREEZING_K {
+                (t - 0.01, (t + 0.01).min(FREEZING_K - 1e-9))
+            } else {
+                ((t - 0.01).max(FREEZING_K + 1e-9), t + 0.01)
+            };
+            diagnostics.budget_evaluations += 2;
+            let slope = (balance(pure_phase(b)) - balance(pure_phase(a))) / (b - a);
+            if !slope.is_finite() {
+                return Err("nonfinite bare-soil sampled slope".into());
+            }
+            maximum = maximum.max(slope);
         }
-        maximum = maximum.max(slope);
-    }
+        if let Some(s) = samples.as_deref_mut() {
+            s.maximum_slope = Some(maximum);
+        }
+        maximum
+    };
     diagnostics.stiffness_lower_bound_w_m2_k = lower;
     diagnostics.maximum_sampled_budget_slope_w_m2_k = maximum;
     let width = entry.material.water_kg_m3() * super::LATENT_J_KG * SoilColumn::node_volume(0) / dt;
     diagnostics.budget_evaluations += 103;
-    let certificate = super::bare_scan::certify(balance, maximum, lower, width)?;
+    let certificate = if let Some(c) = samples.as_ref().and_then(|s| s.certification.as_ref()) {
+        c.clone().with_thresholds(maximum, lower, width)
+    } else {
+        let c = super::bare_scan::certify(balance, maximum, lower, width)?;
+        if let Some(s) = samples.as_deref_mut() {
+            s.certification = Some(c.clone());
+        }
+        c
+    };
     diagnostics.certified = !certificate.failed.iter().any(|f| *f);
+    diagnostics.certification = Some(certificate.clone());
     if !diagnostics.certified {
-        let scan =
-            super::bare_scan::scan(&entry, dt, bottom, balance, lower, [lo, hi], &certificate)?;
+        if let Some(s) = samples.as_deref_mut() {
+            if s.nodes.is_none() {
+                s.nodes = Some([
+                    (0..=631)
+                        .map(|k| balance(pure_phase((2100 + k) as f64 / 10.0)))
+                        .collect(),
+                    (632..=1300)
+                        .map(|k| balance(pure_phase((2100 + k) as f64 / 10.0)))
+                        .collect(),
+                ]);
+            }
+        }
+        let scan = super::bare_scan::scan_with_budgets(
+            &entry,
+            dt,
+            bottom,
+            balance,
+            lower,
+            [lo, hi],
+            &certificate,
+            samples.as_ref().and_then(|s| s.nodes.as_ref()),
+        )?;
         diagnostics.column_solves += 1 + scan.resolve_solves;
         diagnostics.budget_evaluations += 1301;
         diagnostics.scan = Some(scan);

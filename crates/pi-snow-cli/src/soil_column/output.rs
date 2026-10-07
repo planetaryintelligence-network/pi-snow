@@ -2,7 +2,7 @@
 use super::SoilColumn;
 use chrono::{DateTime, Utc};
 
-pub const FIELDS: [&str; 7] = [
+pub const FIELDS: [&str; 10] = [
     "TSOIL_005",
     "TSOIL_010",
     "TSOIL_020",
@@ -10,13 +10,16 @@ pub const FIELDS: [&str; 7] = [
     "SOIL_H",
     "G_SNOW_SOIL",
     "G_BOT",
+    "TSOIL_035",
+    "TSOIL_075",
+    "FL_SOIL_005",
 ];
 
 #[derive(Debug, Clone)]
 pub struct Row {
     pub timestamp: DateTime<Utc>,
     /// Temperatures in kelvin, enthalpy in J m-2, downward fluxes in W m-2.
-    pub values: [f64; 7],
+    pub values: [f64; 10],
     pub temperature_k: [f64; 10],
     pub enthalpy_j_m2: [f64; 10],
     pub liquid_fraction: [f64; 10],
@@ -42,13 +45,16 @@ impl Rows {
         self.rows.push(Row {
             timestamp,
             values: [
-                soil.temperature_at_depth(0.05),
-                soil.temperature_at_depth(0.10),
-                soil.temperature_at_depth(0.20),
-                soil.temperature_at_depth(0.50),
+                soil.temperature_at_depth(0.0508),
+                soil.temperature_at_depth(0.1016),
+                soil.temperature_at_depth(0.2032),
+                soil.temperature_at_depth(0.508),
                 soil.energy_j_m2(),
                 self.interval_top_j_m2 / self.interval_seconds,
                 self.interval_bottom_j_m2 / self.interval_seconds,
+                soil.temperature_at_depth(0.35),
+                soil.temperature_at_depth(0.75),
+                soil.phase(3).liquid_fraction,
             ],
             temperature_k: soil.temperatures(),
             enthalpy_j_m2: soil.enthalpy,
@@ -90,12 +96,12 @@ impl Rows {
                     .split_once('=')
                     .is_some_and(|(k, _)| k.trim() == "units_offset")
                 {
-                    result.push_str(" 0 0 0 0 0 0 0");
+                    result.push_str(&" 0".repeat(FIELDS.len()));
                 } else if line
                     .split_once('=')
                     .is_some_and(|(k, _)| k.trim() == "units_multiplier")
                 {
-                    result.push_str(" 1 1 1 1 1 1 1");
+                    result.push_str(&" 1".repeat(FIELDS.len()));
                 }
                 result.push('\n');
                 data = line == "[DATA]";
@@ -250,6 +256,21 @@ impl Data {
             self.phase_complementarity_failures,
             self.maximum_snow_mass_residual_kg_m2
         );
-        extended.replacen("[DATA]\n", &(metadata + "[DATA]\n"), 1)
+        let a5 = format!(
+            "soil_uncertified_a = {}\nsoil_uncertified_b = {}\nsoil_uncertified_c = {}\nsoil_no_root = {}\nsoil_jump_crossing_rows = {}\nsoil_disagreement_outside_root_cells = {}\nsoil_disagreement_failed_with_roots = {}\nsoil_disagreement_converged_without_roots = {}\nsoil_new_pack_equilibrations = {}\nsoil_new_pack_entry_correction_j_m2 = {:.9}\nsoil_computed_budget_evaluations = {}\nsoil_computed_bare_turbulence_calls = {}\n",
+            c.uncertified_a,
+            c.uncertified_b,
+            c.uncertified_c,
+            c.no_root,
+            c.jump_crossing_rows,
+            c.disagreement_outside_root_cells,
+            c.disagreement_failed_with_roots,
+            c.disagreement_converged_without_roots,
+            c.new_pack_equilibrations,
+            c.new_pack_entry_correction_j_m2,
+            c.computed_budget_evaluations,
+            c.computed_bare_turbulence_calls
+        );
+        extended.replacen("[DATA]\n", &(metadata + &a5 + "[DATA]\n"), 1)
     }
 }

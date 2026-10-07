@@ -2,12 +2,14 @@
 //! Soil stays separate from the native snow composition and bucket transport.
 
 pub mod bare;
+pub mod bare_cache;
 pub mod bare_scan;
 pub mod coupled;
+pub mod coupled_diagnostic;
 pub mod output;
 pub mod phase;
-pub mod runtime;
 mod properties;
+pub mod runtime;
 mod solver;
 
 pub use properties::{FREEZING_K, LATENT_J_KG, Material, Phase};

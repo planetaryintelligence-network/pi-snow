@@ -59,6 +59,16 @@ pub struct Counters {
     pub snow_rows: usize,
     pub certified_rows: usize,
     pub uncertified_rows: usize,
+    pub uncertified_a: usize,
+    pub uncertified_b: usize,
+    pub uncertified_c: usize,
+    pub no_root: usize,
+    pub jump_crossing_rows: usize,
+    pub disagreement_outside_root_cells: usize,
+    pub disagreement_failed_with_roots: usize,
+    pub disagreement_converged_without_roots: usize,
+    pub new_pack_equilibrations: usize,
+    pub new_pack_entry_correction_j_m2: f64,
     pub predicate_not_computed_rows: usize,
     pub multiple_roots: usize,
     pub nonconvergences: usize,
@@ -66,7 +76,9 @@ pub struct Counters {
     pub column_solves: usize,
     /// Bare budget calls, including the final output budget.
     pub budget_evaluations: usize,
+    pub computed_budget_evaluations: usize,
     pub bare_turbulence_calls: usize,
+    pub computed_bare_turbulence_calls: usize,
     pub scan_resolve_solves: usize,
     pub maximum_bare_consistency_w_m2: f64,
     pub bare_consistency_failures: usize,
@@ -82,7 +94,10 @@ pub struct Runtime {
     pub initial_graft_j_m2: f64,
     pub top_energy_j_m2: f64,
     pub bottom_energy_j_m2: f64,
+    pub predicate_cache: Option<super::bare_cache::Shared>,
+    pub last_snow_linearisation: Option<(f64, f64)>,
     initial_energy_j_m2: f64,
+    snow_was_empty: bool,
 }
 
 impl Runtime {
@@ -166,11 +181,14 @@ impl Runtime {
             initial_graft_j_m2,
             top_energy_j_m2: 0.0,
             bottom_energy_j_m2: 0.0,
+            predicate_cache: None,
+            last_snow_linearisation: None,
             initial_energy_j_m2,
+            snow_was_empty: snow.elements.is_empty(),
         })
     }
 
-    fn account_bare(&mut self, diagnostics: &bare::Diagnostics) {
+    pub(super) fn account_bare(&mut self, diagnostics: &bare::Diagnostics) {
         if diagnostics.certification.is_some() {
             self.counters.certified_rows += usize::from(diagnostics.certified);
             self.counters.uncertified_rows += usize::from(!diagnostics.certified);
@@ -178,11 +196,28 @@ impl Runtime {
             self.counters.predicate_not_computed_rows += 1;
         }
         self.counters.multiple_roots += usize::from(diagnostics.multiple_roots());
+        if let Some(c) = &diagnostics.certification {
+            self.counters.uncertified_a += usize::from(c.failed[0]);
+            self.counters.uncertified_b += usize::from(c.failed[1]);
+            self.counters.uncertified_c += usize::from(c.failed[2]);
+        }
+        if let Some(scan) = &diagnostics.scan {
+            self.counters.no_root += usize::from(scan.roots.is_empty());
+            self.counters.jump_crossing_rows += usize::from(scan.jump_crossings.iter().any(|x| *x));
+            self.counters.disagreement_outside_root_cells +=
+                usize::from(scan.agreement == Some(bare::Agreement::OutsideRootCells));
+            self.counters.disagreement_failed_with_roots +=
+                usize::from(scan.agreement == Some(bare::Agreement::FailedWithRoots));
+            self.counters.disagreement_converged_without_roots +=
+                usize::from(scan.agreement == Some(bare::Agreement::ConvergedWithoutRoots));
+        }
         self.counters.nonconvergences += diagnostics.nonconvergences;
         self.counters.newton_iterations += diagnostics.newton_iterations;
         self.counters.column_solves += diagnostics.column_solves;
         self.counters.budget_evaluations += diagnostics.budget_evaluations;
+        self.counters.computed_budget_evaluations += diagnostics.computed_budget_evaluations;
         self.counters.bare_turbulence_calls += 2 * diagnostics.budget_evaluations;
+        self.counters.computed_bare_turbulence_calls += 2 * diagnostics.computed_budget_evaluations;
         self.counters.scan_resolve_solves +=
             diagnostics.scan.as_ref().map_or(0, |s| s.resolve_solves);
     }
@@ -194,6 +229,28 @@ impl Runtime {
         atmosphere: &Atmosphere,
         parameters: &SurfaceParameters,
     ) -> Result<Budget, String> {
+        self.bare_step_inner(snow, dt, atmosphere, parameters, None)
+    }
+
+    pub fn bare_step_for_row(
+        &mut self,
+        snow: &mut Column,
+        dt: f64,
+        atmosphere: &Atmosphere,
+        parameters: &SurfaceParameters,
+        stamp: i64,
+    ) -> Result<Budget, String> {
+        self.bare_step_inner(snow, dt, atmosphere, parameters, Some(stamp))
+    }
+
+    fn bare_step_inner(
+        &mut self,
+        snow: &mut Column,
+        dt: f64,
+        atmosphere: &Atmosphere,
+        parameters: &SurfaceParameters,
+        stamp: Option<i64>,
+    ) -> Result<Budget, String> {
         if !snow.elements.is_empty() {
             return Err("bare solve called with snow".into());
         }
@@ -202,7 +259,21 @@ impl Runtime {
             ..*parameters
         };
         self.counters.bare_rows += 1;
-        let report = match bare::step(&mut self.column, dt, self.bottom, atmosphere, &parameters) {
+        let result = if let Some(cache) = &self.predicate_cache {
+            let stamp =
+                stamp.ok_or("shared predicate cache requires a bound forcing-row timestamp")?;
+            let mut cache = cache.borrow_mut();
+            bare::solve_with_samples(
+                &mut self.column,
+                dt,
+                self.bottom,
+                |p| bare::budget(atmosphere, &parameters, p).total,
+                Some(cache.row(stamp, atmosphere, &parameters)),
+            )
+        } else {
+            bare::step(&mut self.column, dt, self.bottom, atmosphere, &parameters)
+        };
+        let report = match result {
             Ok(report) => report,
             Err(error) => {
                 self.account_bare(&error.diagnostics);
@@ -215,7 +286,9 @@ impl Runtime {
         self.bottom_energy_j_m2 += dt * report.soil.bottom_flux_w_m2;
         snow.node_temperature[0] = self.column.phase(0).temperature_k;
         self.counters.budget_evaluations += 1;
+        self.counters.computed_budget_evaluations += 1;
         self.counters.bare_turbulence_calls += 2;
+        self.counters.computed_bare_turbulence_calls += 2;
         let mut budget = bare::budget(atmosphere, &parameters, self.column.phase(0));
         let difference = (budget.total - report.surface_flux_w_m2).abs();
         self.counters.maximum_bare_consistency_w_m2 =
@@ -237,6 +310,31 @@ impl Runtime {
         conductivity: Conductivity,
         linearisation: pi_snow_core::options::SurfaceLinearisation,
     ) -> Result<Budget, String> {
+        self.snow_step_observed(
+            snow,
+            dt,
+            atmosphere,
+            parameters,
+            sources,
+            ground_shortwave,
+            conductivity,
+            linearisation,
+            None,
+        )
+    }
+
+    pub fn snow_step_observed(
+        &mut self,
+        snow: &mut Column,
+        dt: f64,
+        atmosphere: &Atmosphere,
+        parameters: &SurfaceParameters,
+        sources: &[f64],
+        ground_shortwave: f64,
+        conductivity: Conductivity,
+        linearisation: pi_snow_core::options::SurfaceLinearisation,
+        observe: Option<&mut dyn FnMut(pi_snow_physics::surface_diagnostic::SurfaceIteration)>,
+    ) -> Result<Budget, String> {
         let linearise = match linearisation {
             pi_snow_core::options::SurfaceLinearisation::Phase2 => {
                 pi_snow_physics::surface::linearise
@@ -245,7 +343,7 @@ impl Runtime {
                 pi_snow_physics::surface_numerics::linearise
             }
         };
-        let (budget, report) = coupled::step_with_linearisation(
+        let (budget, report) = coupled::step_observed(
             snow,
             &mut self.column,
             dt,
@@ -256,7 +354,9 @@ impl Runtime {
             ground_shortwave,
             conductivity,
             linearise,
+            observe,
         )?;
+        self.last_snow_linearisation = Some((report.linear_a_w_m2, report.linear_b_w_m2_k));
         self.counters.maximum_coupled_ledger_residual_j_m2 = self
             .counters
             .maximum_coupled_ledger_residual_j_m2
@@ -292,7 +392,16 @@ impl Runtime {
     }
 
     pub fn reconcile(&mut self, snow: &mut Column) -> Result<(), String> {
+        if self.snow_was_empty && !snow.elements.is_empty() {
+            let before = thermal::internal_energy(snow);
+            // The deposit carries its own bottom half-cell temperature. The
+            // bare node's old temperature was soil storage, not snow storage.
+            snow.node_temperature[0] = snow.node_temperature[1];
+            self.counters.new_pack_entry_correction_j_m2 += thermal::internal_energy(snow) - before;
+            self.counters.new_pack_equilibrations += 1;
+        }
         self.top_energy_j_m2 += phase::reconcile(snow, &mut self.column)?;
+        self.snow_was_empty = snow.elements.is_empty();
         Ok(())
     }
 

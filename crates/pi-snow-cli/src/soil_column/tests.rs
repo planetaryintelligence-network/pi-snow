@@ -99,16 +99,14 @@ fn bare_soil_weighted_phase_corners() {
             report.diagnostics.certification.as_ref().unwrap().failed,
             [false; 3]
         );
-        assert!(
-            report
-                .diagnostics
-                .certification
-                .as_ref()
-                .unwrap()
-                .jumps
-                .iter()
-                .all(|j| j.abs() <= bare_scan::TAU)
-        );
+        assert!(report
+            .diagnostics
+            .certification
+            .as_ref()
+            .unwrap()
+            .jumps
+            .iter()
+            .all(|j| j.abs() <= bare_scan::TAU));
         assert!(report.flux_residual_w_m2.abs() <= 1e-6);
         assert_eq!(
             report.surface_flux_w_m2, exact_root,
@@ -218,7 +216,20 @@ fn bare_soil_schur_slope_predicate() {
         [true, false, false]
     );
     let scan = report.diagnostics.scan.as_ref().unwrap();
-    assert_root_cells(scan, &[(Liquid, 280.0, 280.0), (Liquid, 282.7, 282.8)]);
+    assert_eq!(scan.roots.len(), 2);
+    assert_eq!(
+        scan.roots[0]
+            .cells
+            .iter()
+            .map(|c| (c.lo, c.hi))
+            .collect::<Vec<_>>(),
+        vec![(279.9, 280.0), (280.0, 280.1)]
+    );
+    assert_eq!(scan.roots[1].cells[0].segment, Liquid);
+    assert_eq!(
+        (scan.roots[1].cells[0].lo, scan.roots[1].cells[0].hi),
+        (282.7, 282.8)
+    );
     assert_eq!(scan.nodes.each_ref().map(|n| n.len()), [633, 101, 670]);
     assert_eq!(scan.jump_crossings, [false; 2]);
     assert!(report.diagnostics.multiple_roots());
@@ -258,14 +269,23 @@ fn bare_soil_bump_analytic_root_count() {
         report.diagnostics.certification.as_ref().unwrap().failed,
         [true, false, false]
     );
-    assert_root_cells(
-        scan,
-        &[
-            (Liquid, 280.0, 280.0),
-            (Liquid, 289.8, 289.9),
-            (Liquid, 290.0, 290.1),
-        ],
+    assert_eq!(scan.roots.len(), 3);
+    assert_eq!(scan.roots[0].cells.len(), 2);
+    assert_eq!(
+        scan.roots[0]
+            .cells
+            .iter()
+            .map(|cell| (cell.segment, cell.lo, cell.hi))
+            .collect::<Vec<_>>(),
+        vec![(Liquid, 279.9, 280.0), (Liquid, 280.0, 280.1)]
     );
+    for (root, (lo, hi)) in scan.roots[1..].iter().zip([(289.8, 289.9), (290.0, 290.1)]) {
+        assert_eq!(root.cells.len(), 1);
+        assert_eq!(
+            (root.cells[0].segment, root.cells[0].lo, root.cells[0].hi),
+            (Liquid, lo, hi)
+        );
+    }
     assert_eq!(scan.jump_crossings, [false; 2]);
     assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
     for (lo, hi) in [(289.8, 289.9), (290.0, 290.1)] {
@@ -916,11 +936,9 @@ fn soil_runtime_initialization_context() {
         mean_336h_k: None,
         annual_mean_k: 280.0,
     };
-    assert!(
-        Runtime::new(options.soil, context, &mut snow)
-            .unwrap_err()
-            .contains("336")
-    );
+    assert!(Runtime::new(options.soil, context, &mut snow)
+        .unwrap_err()
+        .contains("336"));
     let context = InitializationContext {
         mean_336h_k: Some(285.0),
         ..context
@@ -983,7 +1001,7 @@ fn soil_output_rows_keep_native_columns_and_weighted_fluxes() {
     for key in ["units_offset", "units_multiplier"] {
         assert_eq!(
             result.header[key].split_whitespace().count(),
-            reference.header[key].split_whitespace().count() + 7
+            reference.header[key].split_whitespace().count() + output::FIELDS.len()
         );
     }
     assert_eq!(
@@ -996,7 +1014,7 @@ fn soil_output_rows_keep_native_columns_and_weighted_fluxes() {
             .unwrap()
             .split_whitespace()
             .count(),
-        7
+        output::FIELDS.len()
     );
 }
 
@@ -1077,11 +1095,9 @@ fn soil_runtime_bare_transfer_and_cost_counters() {
         state.column.phase(0).temperature_k
     );
     let before = (state.column.temperatures(), state.column.energy_j_m2());
-    assert!(
-        state
-            .bare_step(&mut snow, 0.0, &atmosphere, &parameters)
-            .is_err()
-    );
+    assert!(state
+        .bare_step(&mut snow, 0.0, &atmosphere, &parameters)
+        .is_err());
     assert_eq!(
         (state.column.temperatures(), state.column.energy_j_m2()),
         before
@@ -1156,10 +1172,9 @@ fn soil_engine_dispatch_bare_snow_and_replayed_state() {
         assert_eq!(data.runtime.counters.bare_consistency_failures, 0);
         assert_eq!(data.runtime.counters.bare_rows > 0, bare);
         assert_eq!(data.runtime.counters.snow_rows > 0, !bare);
-        assert!(
-            out.smet
-                .contains("TSOIL_005 TSOIL_010 TSOIL_020 TSOIL_050 SOIL_H G_SNOW_SOIL G_BOT")
-        );
+        assert!(out
+            .smet
+            .contains("TSOIL_005 TSOIL_010 TSOIL_020 TSOIL_050 SOIL_H G_SNOW_SOIL G_BOT"));
         assert!(out.smet.contains("soil_max_row_ledger_residual_j_m2 ="));
         let mut without_mean = forcing.clone();
         without_mean.header.remove("soil_mean_336h_k");
@@ -1231,4 +1246,424 @@ fn soil_engine_solver_stop_retains_completed_intervals() {
     assert!(partial.smet.contains("2025-10-01T00:10"));
     assert!(!partial.smet.contains("2025-10-01T01:00"));
     assert_eq!(data.runtime.counters.nonconvergences, 1);
+}
+
+#[test]
+fn a5_new_pack_equilibration_preserves_deposit_energy() {
+    use pi_snow_physics::water;
+    for soil_k in [263.0, 283.0] {
+        let mut snow = pi_snow_core::Column::bare_ground(soil_k, 0.0, 0.0);
+        let mut runtime = runtime::Runtime::from_column(
+            engine_soil_options().soil,
+            SoilColumn::uniform(Material::MoistLoam, soil_k),
+            &mut snow,
+        )
+        .unwrap();
+        let mut deposit = coupled_test_snow(0.005, FREEZING_K);
+        let expected = runtime.column.energy_j_m2() + water::energy_relative_to_melt(&deposit);
+        deposit.node_temperature[0] = snow.node_temperature[0];
+        snow = deposit;
+        runtime.reconcile(&mut snow).unwrap();
+        assert!(
+            (runtime.column.energy_j_m2() + water::energy_relative_to_melt(&snow) - expected).abs()
+                < 1e-6
+        );
+        assert_eq!(runtime.counters.new_pack_equilibrations, 1);
+        assert!(runtime.counters.new_pack_entry_correction_j_m2.abs() > 1000.0);
+        runtime.reconcile(&mut snow).unwrap();
+        assert_eq!(runtime.counters.new_pack_equilibrations, 1);
+        assert!(runtime.ledger_residual_j_m2().abs() < 1e-6);
+    }
+}
+
+#[test]
+fn a5_sensor_interpolations_and_hourly_liquid_fraction() {
+    use chrono::{TimeZone, Utc};
+    let mut soil = SoilColumn::air_profile(Material::MoistLoam, 275.0, 285.0, 0.0);
+    soil.enthalpy[3] = 0.4 * soil.material.water_kg_m3() * LATENT_J_KG * SoilColumn::node_volume(3);
+    let mut rows = output::Rows::default();
+    rows.accumulate(600.0, 0.0, 0.0);
+    rows.push(Utc.with_ymd_and_hms(2025, 10, 1, 1, 0, 0).unwrap(), &soil);
+    let values = rows.rows[0].values;
+    for (i, depth) in [0.0508, 0.1016, 0.2032, 0.508].into_iter().enumerate() {
+        assert_eq!(
+            values[i].to_bits(),
+            soil.temperature_at_depth(depth).to_bits()
+        );
+    }
+    assert_eq!(values[7].to_bits(), soil.phase(6).temperature_k.to_bits());
+    assert_eq!(values[8].to_bits(), soil.phase(8).temperature_k.to_bits());
+    assert_eq!(values[9].to_bits(), soil.phase(3).liquid_fraction.to_bits());
+    assert!(values[9] > 0.0 && values[9] < 1.0);
+}
+
+#[test]
+fn a5_zero_node_root_accepts_adjacent_closed_cells() {
+    let soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let mut scan = scan_bare_fixture(&soil, &|p| -15.0 * (p.temperature_k - 280.0));
+    assert_eq!(scan.roots.len(), 1);
+    assert!(scan.roots[0].cells.iter().all(|c| c.hi > c.lo));
+    for t in [280.0 - 1e-9, 280.0 + 1e-9] {
+        scan.assess(Some(bare::pure_phase(t)));
+        assert_eq!(scan.agreement, Some(bare::Agreement::Agree));
+    }
+}
+
+#[test]
+fn a5_runtime_records_all_registered_scan_conditions() {
+    let mut snow = pi_snow_core::Column::bare_ground(280.0, 0.0, 0.0);
+    let mut runtime = runtime::Runtime::from_column(
+        engine_soil_options().soil,
+        SoilColumn::uniform(Material::MoistLoam, 280.0),
+        &mut snow,
+    )
+    .unwrap();
+    let cert = bare_scan::certify(
+        &|p| {
+            if p.temperature_k == FREEZING_K {
+                10.0 * p.liquid_fraction
+            } else {
+                1.0
+            }
+        },
+        2.0,
+        1.0,
+        1.0,
+    )
+    .unwrap();
+    assert_eq!(cert.failed, [true; 3]);
+    let mut roots = scan_bare_fixture(&runtime.column, &|p| -15.0 * (p.temperature_k - 280.0));
+    roots.assess(Some(bare::pure_phase(281.0)));
+    let mut d = bare::Diagnostics {
+        certification: Some(cert),
+        scan: Some(roots.clone()),
+        ..Default::default()
+    };
+    runtime.account_bare(&d);
+    roots.assess(None);
+    d.scan = Some(roots);
+    runtime.account_bare(&d);
+    let mut absent = scan_bare_fixture(&runtime.column, &|_| 1e9);
+    assert!(absent.roots.is_empty());
+    absent.assess(Some(bare::pure_phase(280.0)));
+    d.scan = Some(absent);
+    runtime.account_bare(&d);
+    let (cold, qa) = bare_corner_fixture();
+    let width = cold.material.water_kg_m3() * LATENT_J_KG * SoilColumn::node_volume(0) / 600.0;
+    d.scan = Some(scan_bare_fixture(&cold, &|p| {
+        if p.temperature_k < FREEZING_K {
+            qa - 1.0
+        } else {
+            qa + width + 1.0
+        }
+    }));
+    runtime.account_bare(&d);
+    let c = &runtime.counters;
+    assert_eq!(
+        (c.uncertified_a, c.uncertified_b, c.uncertified_c),
+        (4, 4, 4)
+    );
+    assert_eq!(c.no_root, 1);
+    assert_eq!(c.jump_crossing_rows, 1);
+    assert_eq!(c.disagreement_outside_root_cells, 1);
+    assert_eq!(c.disagreement_failed_with_roots, 1);
+    assert_eq!(c.disagreement_converged_without_roots, 1);
+    let text = output::Data::new(runtime)
+        .extend_smet("SMET 1.1 ASCII\n[HEADER]\nfields = timestamp\n[DATA]\n");
+    for name in [
+        "uncertified_a",
+        "uncertified_b",
+        "uncertified_c",
+        "no_root",
+        "jump_crossing_rows",
+        "disagreement_outside_root_cells",
+        "disagreement_failed_with_roots",
+        "disagreement_converged_without_roots",
+    ] {
+        assert!(text.contains(&format!("soil_{name} =")));
+    }
+}
+
+fn a5_diagnostic_bits(d: &bare::Diagnostics) -> Vec<u64> {
+    let mut bits = vec![
+        d.certified as u64,
+        d.stiffness_lower_bound_w_m2_k.to_bits(),
+        d.maximum_sampled_budget_slope_w_m2_k.to_bits(),
+        d.column_solves as u64,
+        d.budget_evaluations as u64,
+        d.newton_iterations as u64,
+        d.nonconvergences as u64,
+    ];
+    if let Some(c) = &d.certification {
+        bits.push(1);
+        bits.extend(c.failed.iter().map(|x| *x as u64));
+        bits.extend(
+            c.jumps
+                .iter()
+                .chain(c.plateau_budget.iter())
+                .chain(c.corner_budget.iter())
+                .map(|x| x.to_bits()),
+        );
+    } else {
+        bits.push(0);
+    }
+    if let Some(s) = &d.scan {
+        bits.push(1);
+        for segment in &s.nodes {
+            for node in segment {
+                bits.extend([
+                    node.coordinate.to_bits(),
+                    node.budget.to_bits(),
+                    node.flux.map(f64::to_bits).unwrap_or(u64::MAX),
+                    node.sign.map(|x| (x as i64) as u64).unwrap_or(99),
+                ]);
+            }
+        }
+        bits.push(s.roots.len() as u64);
+        for root in &s.roots {
+            bits.push(root.cells.len() as u64);
+            for c in &root.cells {
+                bits.extend([c.segment as u64, c.lo.to_bits(), c.hi.to_bits()]);
+            }
+        }
+        bits.extend(s.jump_crossings.iter().map(|x| *x as u64));
+        bits.extend([
+            s.resolve_solves as u64,
+            s.agreement.map(|a| a as u64).unwrap_or(99),
+        ]);
+    } else {
+        bits.push(0);
+    }
+    bits
+}
+
+fn a5_compare_cached_solve(
+    entry: SoilColumn,
+    bottom: Bottom,
+    balance: &impl Fn(Phase) -> f64,
+    samples: &mut bare_cache::Samples,
+) {
+    let (mut normal, mut cached) = (entry.clone(), entry);
+    let a = bare::solve(&mut normal, 600.0, bottom, balance);
+    let b = bare::solve_with_samples(&mut cached, 600.0, bottom, balance, Some(samples));
+    assert_eq!(
+        normal.enthalpy.map(f64::to_bits),
+        cached.enthalpy.map(f64::to_bits)
+    );
+    let (da, db) = match (a, b) {
+        (Ok(a), Ok(b)) => {
+            assert_eq!(
+                [
+                    a.surface_flux_w_m2.to_bits(),
+                    a.flux_residual_w_m2.to_bits(),
+                    a.soil.top_flux_w_m2.to_bits(),
+                    a.soil.bottom_flux_w_m2.to_bits(),
+                    a.soil.ledger_residual_j_m2.to_bits(),
+                    a.soil.iterations as u64
+                ],
+                [
+                    b.surface_flux_w_m2.to_bits(),
+                    b.flux_residual_w_m2.to_bits(),
+                    b.soil.top_flux_w_m2.to_bits(),
+                    b.soil.bottom_flux_w_m2.to_bits(),
+                    b.soil.ledger_residual_j_m2.to_bits(),
+                    b.soil.iterations as u64
+                ]
+            );
+            (a.diagnostics, b.diagnostics)
+        }
+        (Err(a), Err(b)) => {
+            assert_eq!(a.message, b.message);
+            (a.diagnostics, b.diagnostics)
+        }
+        _ => panic!("cache changed solve outcome"),
+    };
+    assert_eq!(a5_diagnostic_bits(&da), a5_diagnostic_bits(&db));
+    assert!(db.computed_budget_evaluations <= da.computed_budget_evaluations);
+}
+
+#[test]
+fn a5_cached_and_uncached_predicate_scan_and_solves_are_bit_identical() {
+    use pi_snow_physics::{
+        surface::{Atmosphere, SurfaceParameters},
+        turbulence::Scheme,
+    };
+    for scheme in [Scheme::Louis, Scheme::MoHoltslag] {
+        for air in [260.0, 273.15, 285.0] {
+            let atm = Atmosphere {
+                t_air: air,
+                relative_humidity: 0.8,
+                wind: 2.0,
+                absorbed_shortwave: 200.0,
+                ilwr: 310.0,
+                pressure: 80000.0,
+                rain_rate: 0.0,
+            };
+            let params = SurfaceParameters {
+                emissivity: 0.97,
+                z_wind: 10.0,
+                z_scalar: 2.0,
+                z0: 0.002,
+                scheme,
+            };
+            let mut samples = bare_cache::Samples::default();
+            for material in [Material::MoistLoam, Material::DryLoam] {
+                for offset in [-3.0, 0.0, 3.0] {
+                    for bottom in [
+                        Bottom::Geothermal005,
+                        Bottom::Deep {
+                            temperature_k: 278.0,
+                        },
+                    ] {
+                        a5_compare_cached_solve(
+                            SoilColumn::uniform(material, air + offset),
+                            bottom,
+                            &|p| bare::budget(&atm, &params, p).total,
+                            &mut samples,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    for case in 0..3 {
+        let (entry, qa) = bare_corner_fixture();
+        let mut samples = bare_cache::Samples::default();
+        let balance = |p: Phase| match case {
+            0 => bare_bump(p),
+            1 => qa + 2.0 + 20.0 * p.liquid_fraction,
+            _ => {
+                if p.temperature_k < FREEZING_K {
+                    qa - 2.0
+                } else {
+                    qa + 20.0
+                }
+            }
+        };
+        for _ in 0..2 {
+            a5_compare_cached_solve(entry.clone(), Bottom::Insulated, &balance, &mut samples);
+        }
+    }
+}
+
+#[test]
+fn a5_shared_runtime_cache_saves_actual_evaluations_only() {
+    let (cfg, site, forcing) = engine_soil_fixture();
+    let options = engine_soil_options();
+    let end = forcing.rows.last().unwrap().timestamp;
+    let cache = bare_cache::PredicateCache::shared();
+    let run = || {
+        crate::engine::run_with_soil_cache(
+            &cfg,
+            &options,
+            &site,
+            &forcing,
+            pi_snow_core::Column::bare_ground(FREEZING_K, 0.0, 0.0),
+            end,
+            None,
+            None,
+            cache.clone(),
+        )
+        .unwrap()
+    };
+    let first = run();
+    let second = run();
+    let a = &first.soil.as_ref().unwrap().runtime.counters;
+    let b = &second.soil.as_ref().unwrap().runtime.counters;
+    assert_eq!(a.budget_evaluations, b.budget_evaluations);
+    assert_eq!(a.column_solves, b.column_solves);
+    assert!(a.computed_budget_evaluations > b.computed_budget_evaluations + 2700);
+    assert_eq!(first.pro, second.pro);
+    for (a, b) in first
+        .soil
+        .unwrap()
+        .output
+        .rows
+        .iter()
+        .zip(second.soil.unwrap().output.rows.iter())
+    {
+        assert_eq!(a.values.map(f64::to_bits), b.values.map(f64::to_bits));
+        assert_eq!(
+            a.enthalpy_j_m2.map(f64::to_bits),
+            b.enthalpy_j_m2.map(f64::to_bits)
+        );
+    }
+}
+
+#[test]
+fn a5_joint_picard_trace_leaves_physical_state_bit_identical() {
+    use pi_snow_physics::{surface, thermal::Conductivity, turbulence::Scheme};
+    let mut soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let mut snow = coupled_test_snow(0.03, 280.0);
+    let (mut traced_soil, mut traced_snow) = (soil.clone(), snow.clone());
+    let atm = surface::Atmosphere {
+        t_air: 278.0,
+        relative_humidity: 0.8,
+        wind: 2.0,
+        absorbed_shortwave: 100.0,
+        ilwr: 310.0,
+        pressure: 80000.0,
+        rain_rate: 0.0,
+    };
+    let params = surface::SurfaceParameters {
+        emissivity: 0.9875,
+        z_wind: 2.0,
+        z_scalar: 2.0,
+        z0: 0.002,
+        scheme: Scheme::Louis,
+    };
+    let plain = coupled::step_with_linearisation(
+        &mut snow,
+        &mut soil,
+        600.0,
+        Bottom::Geothermal005,
+        &atm,
+        &params,
+        &[1.0],
+        2.0,
+        Conductivity::Yen1981,
+        surface::linearise,
+    )
+    .unwrap();
+    let mut records = Vec::new();
+    let traced = coupled::step_observed(
+        &mut traced_snow,
+        &mut traced_soil,
+        600.0,
+        Bottom::Geothermal005,
+        &atm,
+        &params,
+        &[1.0],
+        2.0,
+        Conductivity::Yen1981,
+        surface::linearise,
+        Some(&mut |r| records.push(r)),
+    )
+    .unwrap();
+    assert_eq!(
+        soil.enthalpy.map(f64::to_bits),
+        traced_soil.enthalpy.map(f64::to_bits)
+    );
+    assert_eq!(
+        snow.node_temperature
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        traced_snow
+            .node_temperature
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(plain.0.total.to_bits(), traced.0.total.to_bits());
+    assert_eq!(records.len(), 3);
+    for (i, r) in records.iter().enumerate() {
+        assert_eq!(r.iteration, i + 1);
+        assert!(r.conduction.residual_linf < 1e-6);
+        assert!(r.a_w_m2.is_finite() && r.b_w_m2_k.is_finite());
+        assert_eq!(
+            r.surface_linearization_residual_w_m2.to_bits(),
+            (r.nonlinear_budget_w_m2 - (r.a_w_m2 + r.b_w_m2_k * r.solved_surface_k)).to_bits()
+        );
+    }
 }

@@ -9,6 +9,8 @@ pub struct CoupledReport {
     pub soil: StepReport,
     pub surface_flux_w_m2: f64,
     pub combined_ledger_residual_j_m2: f64,
+    pub linear_a_w_m2: f64,
+    pub linear_b_w_m2_k: f64,
 }
 
 /// Algebraic Schur elimination preserves the shared node's two storage terms.
@@ -108,6 +110,8 @@ pub fn linear_step(
         soil: soil_report,
         surface_flux_w_m2: surface_flux,
         combined_ledger_residual_j_m2: residual,
+        linear_a_w_m2: a,
+        linear_b_w_m2_k: b,
     })
 }
 
@@ -150,11 +154,40 @@ pub fn step_with_linearisation(
     conductivity: Conductivity,
     linearise: fn(&Atmosphere, &SurfaceParameters, f64) -> (f64, f64),
 ) -> Result<(Budget, CoupledReport), String> {
+    step_observed(
+        snow,
+        soil,
+        dt,
+        bottom,
+        atm,
+        parameters,
+        sources,
+        ground_shortwave,
+        conductivity,
+        linearise,
+        None,
+    )
+}
+
+pub fn step_observed(
+    snow: &mut Column,
+    soil: &mut SoilColumn,
+    dt: f64,
+    bottom: Bottom,
+    atm: &Atmosphere,
+    parameters: &SurfaceParameters,
+    sources: &[f64],
+    ground_shortwave: f64,
+    conductivity: Conductivity,
+    linearise: fn(&Atmosphere, &SurfaceParameters, f64) -> (f64, f64),
+    mut observe: Option<&mut dyn FnMut(pi_snow_physics::surface_diagnostic::SurfaceIteration)>,
+) -> Result<(Budget, CoupledReport), String> {
     let entry_snow = snow.clone();
     let entry_soil = soil.clone();
     let mut t_linear = *snow.node_temperature.last().ok_or("no surface node")?;
     let mut final_result = None;
-    for _ in 0..3 {
+    for iteration in 1..=3 {
+        let input = t_linear;
         let (a, b) = linearise(atm, parameters, t_linear);
         let mut trial_snow = entry_snow.clone();
         let mut trial_soil = entry_soil.clone();
@@ -169,6 +202,23 @@ pub fn step_with_linearisation(
             ground_shortwave,
             conductivity,
         )?;
+        if let Some(observer) = observe.as_deref_mut() {
+            observer(super::coupled_diagnostic::iteration(
+                iteration,
+                input,
+                a,
+                b,
+                &entry_snow,
+                &trial_snow,
+                &report,
+                atm,
+                parameters,
+                sources,
+                ground_shortwave,
+                dt,
+                conductivity,
+            )?);
+        }
         t_linear = *trial_snow.node_temperature.last().unwrap();
         final_result = Some((trial_snow, trial_soil, report));
     }

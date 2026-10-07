@@ -82,6 +82,8 @@ pub enum RunError {
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
+    #[error("invalid SOIL_COLUMN initialization: {0}")]
+    SoilInitialization(String),
     #[error("MERRA-2 deposition is missing for snow-covered step at {time}")]
     MissingDeposition { time: DateTime<Utc> },
     /// Soil numerical failure is a separate registered stop class.
@@ -186,7 +188,7 @@ pub fn run_with_options(
     end: DateTime<Utc>,
 ) -> Result<RunOutput, RunError> {
     run_with_options_and_diagnostics_and_deposition(
-        cfg, options, site, forcing, start, end, None, None, None,
+        cfg, options, site, forcing, start, end, None, None, None, None,
     )
 }
 
@@ -210,6 +212,7 @@ pub fn run_with_diagnostics(
         diagnostic_mode,
         None,
         None,
+        None,
     )
 }
 
@@ -224,7 +227,7 @@ pub fn run_with_options_and_deposition(
     merra2: Option<&DepositionSeries>,
 ) -> Result<RunOutput, RunError> {
     run_with_options_and_diagnostics_and_deposition(
-        cfg, options, site, forcing, start, end, None, merra2, None,
+        cfg, options, site, forcing, start, end, None, merra2, None, None,
     )
 }
 
@@ -249,6 +252,33 @@ pub fn run_with_soil_state(
         diagnostic_mode,
         None,
         Some(soil),
+        None,
+    )
+}
+
+/// A5.3: the bound runner shares one predicate cache among a unit-season's arms.
+pub fn run_with_soil_cache(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    diagnostic_mode: Option<DiagnosticMode>,
+    initial_soil: Option<crate::soil_column::SoilColumn>,
+    cache: crate::soil_column::bare_cache::Shared,
+) -> Result<RunOutput, RunError> {
+    run_with_options_and_diagnostics_and_deposition(
+        cfg,
+        options,
+        site,
+        forcing,
+        start,
+        end,
+        diagnostic_mode,
+        None,
+        initial_soil,
+        Some(cache),
     )
 }
 
@@ -262,6 +292,7 @@ fn run_with_options_and_diagnostics_and_deposition(
     diagnostic_mode: Option<DiagnosticMode>,
     merra2: Option<&DepositionSeries>,
     initial_soil: Option<crate::soil_column::SoilColumn>,
+    predicate_cache: Option<crate::soil_column::bare_cache::Shared>,
 ) -> Result<RunOutput, RunError> {
     options
         .soil
@@ -270,7 +301,9 @@ fn run_with_options_and_diagnostics_and_deposition(
             options.total_melt == TotalMelt::CrocusEq116,
         )
         .map_err(RunError::IncompatiblePhysics)?;
-    if initial_soil.is_some() && options.ground_boundary != GroundBoundary::SoilColumn {
+    if (initial_soil.is_some() || predicate_cache.is_some())
+        && options.ground_boundary != GroundBoundary::SoilColumn
+    {
         return Err(RunError::IncompatiblePhysics(
             "replayed soil state requires GROUND_BOUNDARY=SOIL_COLUMN",
         ));
@@ -348,14 +381,15 @@ fn run_with_options_and_diagnostics_and_deposition(
             output::Data,
             runtime::{InitializationContext, Runtime},
         };
-        let runtime = if let Some(state) = initial_soil {
+        let mut runtime = if let Some(state) = initial_soil {
             Runtime::from_column(options.soil, state, &mut column)
         } else {
             let context = InitializationContext::from_forcing(options.soil, forcing)
                 .map_err(RunError::IncompatiblePhysics)?;
             Runtime::new(options.soil, context, &mut column)
         }
-        .map_err(|_| RunError::IncompatiblePhysics("invalid SOIL_COLUMN initialization"))?;
+        .map_err(RunError::SoilInitialization)?;
+        runtime.predicate_cache = predicate_cache;
         Some(Data::new(runtime))
     } else {
         None
@@ -658,12 +692,12 @@ fn run_with_options_and_diagnostics_and_deposition(
                     rain_rate: liquid / dt,
                     ..atm
                 };
-                let result = soil.borrow_mut().as_mut().unwrap().runtime.bare_step(
-                    &mut column,
-                    dt,
-                    &atm,
-                    &params,
-                );
+                let result = soil
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .bare_step_for_row(&mut column, dt, &atm, &params, t.timestamp());
                 (soil_try!(result, t), site.soil_albedo, 0.0)
             } else {
                 column.node_temperature[0] = tsg;
@@ -752,27 +786,37 @@ fn run_with_options_and_diagnostics_and_deposition(
                 .as_ref()
                 .map(|data| data.runtime.top_energy_j_m2);
             let (b, linear_a, linear_b, solved_surface_temperature) = if soil.borrow().is_some() {
-                let result = soil.borrow_mut().as_mut().unwrap().runtime.snow_step(
-                    &mut column,
-                    dt,
-                    &atm,
-                    &params,
-                    &absorbed.per_element,
-                    absorbed.to_ground,
-                    conductivity,
-                    options.surface_linearisation,
-                );
+                let mut observer = |iteration| trace_surface_iterations.push(iteration);
+                let tracing = matches!(diagnostic_mode, Some(DiagnosticMode::Trace));
+                let result = soil
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .snow_step_observed(
+                        &mut column,
+                        dt,
+                        &atm,
+                        &params,
+                        &absorbed.per_element,
+                        absorbed.to_ground,
+                        conductivity,
+                        options.surface_linearisation,
+                        if tracing { Some(&mut observer) } else { None },
+                    );
                 let b = soil_try!(result, t);
                 if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
                     trace_post_solve_nodes = column.node_temperature.clone();
                     trace_shortwave = atm.absorbed_shortwave;
                 }
-                (
-                    b,
-                    f64::NAN,
-                    f64::NAN,
-                    *column.node_temperature.last().unwrap(),
-                )
+                let (a, linear_b) = soil
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .runtime
+                    .last_snow_linearisation
+                    .unwrap();
+                (b, a, linear_b, *column.node_temperature.last().unwrap())
             } else if record_linearisation {
                 if options.surface_linearisation != SurfaceLinearisation::Phase2 {
                     return Err(RunError::IncompatiblePhysics(

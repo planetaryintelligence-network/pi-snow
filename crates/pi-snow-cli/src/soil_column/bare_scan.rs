@@ -90,20 +90,29 @@ pub fn certify(
         plateau_budget[0] - corner_budget[0],
         corner_budget[1] - plateau_budget[100],
     ];
-    let max_plateau_slope = plateau_budget
-        .windows(2)
-        .map(|p| (p[1] - p[0]) / 0.01)
-        .fold(f64::NEG_INFINITY, f64::max);
     Ok(Certification {
-        failed: [
-            maximum_slope >= lower,
-            max_plateau_slope >= width,
-            jumps.iter().any(|j| j.abs() > TAU),
-        ],
+        failed: [false; 3],
         jumps,
         plateau_budget,
         corner_budget,
-    })
+    }
+    .with_thresholds(maximum_slope, lower, width))
+}
+
+impl Certification {
+    pub(super) fn with_thresholds(mut self, maximum_slope: f64, lower: f64, width: f64) -> Self {
+        let max_plateau_slope = self
+            .plateau_budget
+            .windows(2)
+            .map(|p| (p[1] - p[0]) / 0.01)
+            .fold(f64::NEG_INFINITY, f64::max);
+        self.failed = [
+            maximum_slope >= lower,
+            max_plateau_slope >= width,
+            self.jumps.iter().any(|j| j.abs() > TAU),
+        ];
+        self
+    }
 }
 
 pub fn dirichlet(entry: &SoilColumn, dt: f64, bottom: Bottom, t: f64) -> Result<f64, String> {
@@ -168,6 +177,28 @@ pub fn scan(
     bracket: [f64; 2],
     certificate: &Certification,
 ) -> Result<RootScan, String> {
+    scan_with_budgets(
+        entry,
+        dt,
+        bottom,
+        balance,
+        lower,
+        bracket,
+        certificate,
+        None,
+    )
+}
+
+pub(super) fn scan_with_budgets(
+    entry: &SoilColumn,
+    dt: f64,
+    bottom: Bottom,
+    balance: &impl Fn(Phase) -> f64,
+    lower: f64,
+    bracket: [f64; 2],
+    certificate: &Certification,
+    samples: Option<&[Vec<f64>; 2]>,
+) -> Result<RootScan, String> {
     let qb = dirichlet(entry, dt, bottom, FREEZING_K)?;
     let width = entry.material.water_kg_m3() * LATENT_J_KG * SoilColumn::node_volume(0) / dt;
     let qa = qb - width;
@@ -176,7 +207,7 @@ pub fn scan(
             let t = (2100 + k) as f64 / 10.0;
             Node {
                 coordinate: t,
-                budget: balance(super::bare::pure_phase(t)),
+                budget: samples.map_or_else(|| balance(super::bare::pure_phase(t)), |s| s[0][k]),
                 flux: None,
                 sign: None,
             }
@@ -211,7 +242,7 @@ pub fn scan(
         let t = (2100 + k) as f64 / 10.0;
         Node {
             coordinate: t,
-            budget: balance(super::bare::pure_phase(t)),
+            budget: samples.map_or_else(|| balance(super::bare::pure_phase(t)), |s| s[1][k - 632]),
             flux: None,
             sign: None,
         }
@@ -248,18 +279,27 @@ pub fn scan(
         .into_iter()
         .zip(&nodes)
     {
-        for node in entries {
+        for (index, node) in entries.iter().enumerate() {
             let s = node.sign.unwrap();
             if s == 0 {
-                let cell = Cell {
+                // A zero node belongs to both adjacent closed cells, including
+                // a solve that accepts slightly to either side of the node.
+                let cells: Vec<Cell> = [
+                    index.checked_sub(1),
+                    (index + 1 < entries.len()).then_some(index),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|i| Cell {
                     segment,
-                    lo: node.coordinate,
-                    hi: node.coordinate,
-                };
+                    lo: entries[i].coordinate,
+                    hi: entries[i + 1].coordinate,
+                })
+                .collect();
                 if in_zero_run {
-                    roots.last_mut().unwrap().cells.push(cell);
+                    roots.last_mut().unwrap().cells.extend(cells);
                 } else {
-                    roots.push(Root { cells: vec![cell] });
+                    roots.push(Root { cells });
                 }
             } else if let Some((old_segment, old)) = previous {
                 if segment == old_segment && old.sign.unwrap() * s < 0 {

@@ -28,19 +28,21 @@ fn capacities(column: &Column) -> Vec<f64> {
 fn joint_temperature(soil: &mut SoilColumn, energy: f64, snow_capacity: f64) -> f64 {
     let volume = SoilColumn::node_volume(0);
     let latent = soil.material.water_kg_m3() * LATENT_J_KG * volume;
-    let (temperature, enthalpy) = if energy <= 0.0 {
+    let enthalpy = if energy <= 0.0 {
         let c = soil.material.capacity(0.0) * volume;
         let delta = energy / (c + snow_capacity);
-        (FREEZING_K + delta, c * delta)
+        c * delta
     } else if energy >= latent {
         let c = soil.material.capacity(1.0) * volume;
         let delta = (energy - latent) / (c + snow_capacity);
-        (FREEZING_K + delta, latent + c * delta)
+        latent + c * delta
     } else {
-        (FREEZING_K, energy)
+        energy
     };
     soil.enthalpy[0] = enthalpy;
-    temperature
+    // Use the enthalpy inversion as the single shared-node temperature.
+    // A separate inversion through lumped capacity can differ by one ULP.
+    soil.phase(0).temperature_k
 }
 
 /// Snow melting/thinning uses the native published operator; its energy half

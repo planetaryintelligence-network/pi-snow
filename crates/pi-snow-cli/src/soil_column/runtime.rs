@@ -191,6 +191,11 @@ impl Runtime {
         Ok(runoff)
     }
 
+    pub fn reconcile(&mut self, snow: &mut Column) -> Result<(), String> {
+        self.top_energy_j_m2 += phase::reconcile(snow, &mut self.column)?;
+        Ok(())
+    }
+
     pub fn ledger_residual_j_m2(&self) -> f64 {
         self.column.energy_j_m2()
             - self.initial_energy_j_m2

@@ -163,3 +163,23 @@ pub fn cascade(
     column.node_temperature[0] = temperature;
     Ok((runoff, soil.energy_j_m2() - before))
 }
+
+/// Reconcile a native material operator's resulting snow storage with soil.
+/// The operator has already assigned its sensible energy to the new snow nodes.
+/// Only the shared energy is redistributed; the resulting total is preserved.
+pub fn reconcile(column: &mut Column, soil: &mut SoilColumn) -> Result<f64, String> {
+    let snow_t = *column
+        .node_temperature
+        .first()
+        .ok_or("missing shared node")?;
+    if !snow_t.is_finite() {
+        return Err("nonfinite operator shared node".into());
+    }
+    if snow_t == soil.phase(0).temperature_k {
+        return Ok(0.0);
+    }
+    let before = soil.energy_j_m2();
+    let energy = soil.enthalpy[0] + capacities(column)[0] * (snow_t - FREEZING_K);
+    column.node_temperature[0] = joint_temperature(soil, energy, capacities(column)[0]);
+    Ok(soil.energy_j_m2() - before)
+}

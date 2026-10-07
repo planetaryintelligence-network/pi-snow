@@ -937,3 +937,86 @@ fn soil_runtime_initialization_context() {
     assert_eq!(runtime.initial_graft_j_m2, 0.0);
     assert_eq!(runtime.ledger_residual_j_m2(), 0.0);
 }
+
+#[test]
+fn soil_output_rows_keep_native_columns_and_weighted_fluxes() {
+    use chrono::{TimeZone, Utc};
+    use pi_snow_io::smet::{self, OutputRow, Smet};
+    let timestamp = Utc.with_ymd_and_hms(2025, 10, 1, 1, 0, 0).unwrap();
+    let native = smet::write_output_smet(
+        "O",
+        "O",
+        40.0,
+        -111.0,
+        2500.0,
+        0.0,
+        0.0,
+        &[OutputRow::nodata(timestamp)],
+    );
+    let soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let mut rows = output::Rows::default();
+    rows.accumulate(300.0, 3000.0, -15.0);
+    rows.accumulate(600.0, 12000.0, -30.0);
+    rows.push(timestamp, &soil);
+    let text = rows.extend_smet(&native);
+    let result = Smet::parse(&text).unwrap();
+    let reference = Smet::parse(&native).unwrap();
+    assert_eq!(&result.fields[..reference.fields.len()], &reference.fields);
+    assert_eq!(
+        &result.rows[0].values[..reference.rows[0].values.len()],
+        &reference.rows[0].values
+    );
+    assert_eq!(
+        result.rows[0].values[result.field_index("TSOIL_005").unwrap()],
+        Some(280.0)
+    );
+    assert!(
+        (result.rows[0].values[result.field_index("G_SNOW_SOIL").unwrap()].unwrap()
+            - 15000.0 / 900.0)
+            .abs()
+            < 1e-9
+    );
+    assert_eq!(
+        result.rows[0].values[result.field_index("G_BOT").unwrap()],
+        Some(-0.05)
+    );
+    for key in ["units_offset", "units_multiplier"] {
+        assert_eq!(
+            result.header[key].split_whitespace().count(),
+            reference.header[key].split_whitespace().count() + 7
+        );
+    }
+    assert_eq!(
+        text.split("[DATA]\n")
+            .nth(1)
+            .unwrap()
+            .strip_suffix('\n')
+            .unwrap()
+            .strip_prefix(native.split("[DATA]\n").nth(1).unwrap().trim_end())
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        7
+    );
+}
+
+#[test]
+fn soil_shared_node_reconciles_native_merge_energy() {
+    use pi_snow_physics::{new_snow, thermal, water};
+    let mut snow = coupled_test_snow(1e-6, 280.0);
+    snow.elements.push(snow.elements[0].clone());
+    snow.elements[1].thickness = 0.03;
+    snow.node_temperature.push(278.0);
+    let mut soil = SoilColumn::uniform(Material::MoistLoam, 280.0);
+    let before = water::energy_relative_to_melt(&snow) + soil.energy_j_m2();
+    new_snow::merge_thin_elements(&mut snow, 0.001);
+    assert_eq!(snow.elements.len(), 1);
+    let after_native = water::energy_relative_to_melt(&snow) + soil.energy_j_m2();
+    assert!((after_native - before).abs() < 1e-6);
+    let exchange = phase::reconcile(&mut snow, &mut soil).unwrap();
+    let after_shared = water::energy_relative_to_melt(&snow) + soil.energy_j_m2();
+    assert!((after_shared - after_native).abs() < 1e-6);
+    assert!(exchange.is_finite());
+    assert_eq!(snow.node_temperature[0], soil.phase(0).temperature_k);
+    assert!(thermal::internal_energy(&snow).is_finite());
+}

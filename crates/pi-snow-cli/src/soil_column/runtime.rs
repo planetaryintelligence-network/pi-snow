@@ -25,6 +25,7 @@ pub struct Counters {
     pub snow_rows: usize,
     pub certified_rows: usize,
     pub uncertified_rows: usize,
+    pub predicate_not_computed_rows: usize,
     pub multiple_roots: usize,
     pub nonconvergences: usize,
     pub newton_iterations: usize,
@@ -103,8 +104,12 @@ impl Runtime {
     }
 
     fn account_bare(&mut self, diagnostics: &bare::Diagnostics) {
-        self.counters.certified_rows += usize::from(diagnostics.certified);
-        self.counters.uncertified_rows += usize::from(!diagnostics.certified);
+        if diagnostics.certification.is_some() {
+            self.counters.certified_rows += usize::from(diagnostics.certified);
+            self.counters.uncertified_rows += usize::from(!diagnostics.certified);
+        } else {
+            self.counters.predicate_not_computed_rows += 1;
+        }
         self.counters.multiple_roots += usize::from(diagnostics.multiple_roots());
         self.counters.nonconvergences += diagnostics.nonconvergences;
         self.counters.newton_iterations += diagnostics.newton_iterations;

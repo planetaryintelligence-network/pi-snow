@@ -695,3 +695,107 @@ fn coupled_thermal_ledger_and_shared_node() {
         }
     }
 }
+
+#[test]
+fn soil_phase_shared_storage_and_transport() {
+    use pi_snow_core::options::WaterRetention;
+    use pi_snow_physics::water;
+    for thickness in [4e-9, 1e-6, 0.03] {
+        for temperature in [268.15, FREEZING_K, 278.15] {
+            let mut soil = SoilColumn::uniform(Material::MoistLoam, temperature);
+            let mut snow = coupled_test_snow(thickness, temperature);
+            snow.elements[0].composition.water = 0.1;
+            snow.elements[0].composition.air -= 0.1;
+            let mut native = snow.clone();
+            let reference = water::phase_change(&mut native);
+            let report = phase::phase_change(&mut snow, &mut soil).unwrap();
+            assert_eq!(report.snow, reference, "snow phase amounts changed");
+            assert_eq!(
+                snow.elements, native.elements,
+                "snow composition operator changed"
+            );
+            assert_eq!(&snow.node_temperature[1..], &native.node_temperature[1..]);
+            assert_eq!(snow.node_temperature[0], soil.phase(0).temperature_k);
+            assert!(report.combined_ledger_residual_j_m2.abs() <= 1e-6);
+            let before = water::energy_relative_to_melt(&snow) + soil.energy_j_m2();
+            let (runoff, _) =
+                phase::cascade(&mut snow, &mut soil, WaterRetention::Wever2014Printed).unwrap();
+            let after = water::energy_relative_to_melt(&snow) + soil.energy_j_m2();
+            assert!((after - before + pi_snow_core::constants::LH_FUSION * runoff).abs() <= 1e-6);
+            assert_eq!(snow.node_temperature[0], soil.phase(0).temperature_k);
+        }
+    }
+}
+
+#[test]
+fn thin_element_on_soil() {
+    use pi_snow_core::options::WaterRetention;
+    use pi_snow_physics::surface::{Atmosphere, SurfaceParameters};
+    use pi_snow_physics::thermal::Conductivity;
+    use pi_snow_physics::turbulence::Scheme;
+    let mut soil = SoilColumn::uniform(Material::MoistLoam, 279.15);
+    let mut snow = coupled_test_snow(4e-9, 279.15);
+    snow.elements[0].composition = pi_snow_core::Composition::dry_snow(600.0);
+    assert!((snow.swe() - 2.4e-6).abs() <= 1e-20);
+    let water = soil.layer_water_kg_m2();
+    let params = SurfaceParameters {
+        emissivity: 0.97,
+        z_wind: 2.0,
+        z_scalar: 2.0,
+        z0: 0.01,
+        scheme: Scheme::Louis,
+    };
+    let atm = Atmosphere {
+        t_air: 285.15,
+        relative_humidity: 0.7,
+        wind: 2.0,
+        absorbed_shortwave: 200.0,
+        ilwr: 350.0,
+        pressure: 80000.0,
+        rain_rate: 0.0,
+    };
+    let mut cleared = None;
+    for step in 1..=144 {
+        if snow.elements.is_empty() {
+            bare::step(&mut soil, 600.0, Bottom::Geothermal005, &atm, &params).unwrap();
+            snow.node_temperature[0] = soil.phase(0).temperature_k;
+        } else {
+            let (_, report) = coupled::step(
+                &mut snow,
+                &mut soil,
+                600.0,
+                Bottom::Geothermal005,
+                &atm,
+                &params,
+                &[0.0],
+                0.0,
+                Conductivity::Yen1981,
+            )
+            .unwrap();
+            assert!(report.combined_ledger_residual_j_m2.abs() <= 1e-3);
+            let phase = phase::phase_change(&mut snow, &mut soil).unwrap();
+            assert!(phase.combined_ledger_residual_j_m2.abs() <= 1e-6);
+            phase::cascade(&mut snow, &mut soil, WaterRetention::Wever2014Printed).unwrap();
+            if snow.elements.is_empty() {
+                cleared = Some(step);
+            }
+        }
+        for t in soil
+            .temperatures()
+            .into_iter()
+            .chain(snow.node_temperature.iter().copied())
+        {
+            assert!(t.is_finite() && (210.0..=340.0).contains(&t));
+        }
+        assert_eq!(soil.layer_water_kg_m2(), water);
+    }
+    assert!(
+        snow.elements.is_empty(),
+        "4 nm sole element did not clear within 24 h"
+    );
+    eprintln!(
+        "U9 4 nm / 2.4 mg m-2: cleared at 600 s step {:?}, final soil top {} K",
+        cleared,
+        soil.phase(0).temperature_k
+    );
+}

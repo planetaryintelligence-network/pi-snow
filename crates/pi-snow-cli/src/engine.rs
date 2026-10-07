@@ -226,6 +226,18 @@ fn run_with_options_and_diagnostics_and_deposition(
     diagnostic_mode: Option<DiagnosticMode>,
     merra2: Option<&DepositionSeries>,
 ) -> Result<RunOutput, RunError> {
+    options
+        .soil
+        .validate(
+            options.ground_boundary == GroundBoundary::SoilColumn,
+            options.total_melt == TotalMelt::CrocusEq116,
+        )
+        .map_err(RunError::IncompatiblePhysics)?;
+    if options.ground_boundary == GroundBoundary::SoilColumn {
+        return Err(RunError::IncompatiblePhysics(
+            "SOIL_COLUMN production dispatch is not yet available",
+        ));
+    }
     let field = |name: &'static str| {
         forcing
             .field_index(name)
@@ -599,6 +611,7 @@ fn run_with_options_and_diagnostics_and_deposition(
             let ground = match options.ground_boundary {
                 GroundBoundary::Phase2 => Ground::Temperature(tsg),
                 GroundBoundary::GeoHeatFlux => Ground::Flux(cfg.geo_heat),
+                GroundBoundary::SoilColumn => unreachable!("soil dispatch precedes native solve"),
             };
             let record_linearisation = options.ground_boundary != GroundBoundary::Phase2
                 || options.total_melt != TotalMelt::Phase2
@@ -928,6 +941,9 @@ fn run_with_options_and_diagnostics_and_deposition(
                     match options.ground_boundary {
                         GroundBoundary::Phase2 => "DIRICHLET",
                         GroundBoundary::GeoHeatFlux => "GEO_HEAT_FLUX",
+                        GroundBoundary::SoilColumn => {
+                            unreachable!("soil dispatch precedes native solve")
+                        }
                     },
                     if options.ground_boundary == GroundBoundary::GeoHeatFlux {
                         cfg.geo_heat

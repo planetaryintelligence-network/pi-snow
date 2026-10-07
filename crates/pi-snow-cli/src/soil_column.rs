@@ -5,6 +5,7 @@ pub mod bare;
 pub mod bare_scan;
 pub mod coupled;
 pub mod phase;
+pub mod runtime;
 mod properties;
 mod solver;
 

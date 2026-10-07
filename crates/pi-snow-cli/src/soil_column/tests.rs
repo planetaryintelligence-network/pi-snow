@@ -799,3 +799,141 @@ fn thin_element_on_soil() {
         soil.phase(0).temperature_k
     );
 }
+
+#[test]
+fn soil_key_refusals() {
+    use crate::engine::{self, RunError, Site};
+    use pi_snow_core::{Column, PhysicsOptions};
+    use pi_snow_io::{
+        ini::{Ini, RunConfig},
+        smet::Smet,
+    };
+    let cfg = RunConfig::from_ini(
+        &Ini::parse(include_str!(
+            "../../../pi-snow-io/tests/fixtures/run_ULAMB1.ini"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let forcing = Smet::parse(
+        "SMET 1.1 ASCII\n[HEADER]\nfields = timestamp TA\n[DATA]\n2025-10-01T00:00 280\n",
+    )
+    .unwrap();
+    let site = Site {
+        station_id: "U12".into(),
+        station_name: "U12".into(),
+        latitude: 40.0,
+        longitude: -111.0,
+        altitude: 2500.0,
+        slope_angle: 0.0,
+        slope_azimuth: 0.0,
+        soil_albedo: 0.09,
+    };
+    for settings in [
+        vec!["SOIL_PROPERTIES=MOIST_LOAM"],
+        vec!["SOIL_BOTTOM=GEOTHERMAL_005"],
+        vec!["SOIL_INIT=UNIFORM_TMELT"],
+        vec!["SOIL_TBOT_K=280"],
+        vec!["SOIL_INIT_OFFSET_K=0"],
+        vec![
+            "GROUND_BOUNDARY=SOIL_COLUMN",
+            "TOTAL_MELT=CROCUS_EQ116",
+            "SOIL_PROPERTIES=MOIST_LOAM",
+            "SOIL_BOTTOM=GEOTHERMAL_005",
+            "SOIL_INIT=UNIFORM_TMELT",
+        ],
+    ] {
+        let options = PhysicsOptions::from_settings(settings.iter().copied()).unwrap();
+        let error = engine::run_with_options(
+            &cfg,
+            &options,
+            &site,
+            &forcing,
+            Column::bare_ground(273.15, 0.0, 0.0),
+            forcing.rows[0].timestamp,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, RunError::IncompatiblePhysics(_)),
+            "{settings:?}: {error}"
+        );
+        assert!(error.to_string().contains("SOIL_"));
+    }
+    for offset in ["0", "+3", "-3"] {
+        let mut options = PhysicsOptions::from_settings([
+            "GROUND_BOUNDARY=SOIL_COLUMN",
+            "SOIL_PROPERTIES=DRY_LOAM",
+            "SOIL_BOTTOM=DEEP_TBOT_8M",
+            "SOIL_TBOT_K=281.25",
+            "SOIL_INIT=AIR_PROFILE",
+        ])
+        .unwrap();
+        options
+            .set(&format!("SOIL_INIT_OFFSET_K={offset}"))
+            .unwrap();
+        options.soil.validate(true, false).unwrap();
+        assert_eq!(options.soil.offset_k(), offset.parse::<f64>().unwrap());
+        assert_eq!(options.soil.tbot_k(), Some(281.25));
+    }
+    assert!(PhysicsOptions::from_settings(["SOIL_TBOT_K=NaN"]).is_err());
+    assert!(PhysicsOptions::from_settings(["SOIL_INIT_OFFSET_K=1"]).is_err());
+    assert!(PhysicsOptions::from_settings(["SOIL_MAYBE=1"]).is_err());
+    let options = PhysicsOptions::from_settings([
+        "GROUND_BOUNDARY=SOIL_COLUMN",
+        "SOIL_PROPERTIES=MOIST_LOAM",
+        "SOIL_BOTTOM=DEEP_TBOT_8M",
+        "SOIL_INIT=UNIFORM_TMELT",
+    ])
+    .unwrap();
+    assert!(options.soil.validate(true, false).is_err());
+    let options = PhysicsOptions::from_settings([
+        "GROUND_BOUNDARY=SOIL_COLUMN",
+        "SOIL_PROPERTIES=MOIST_LOAM",
+        "SOIL_BOTTOM=GEOTHERMAL_005",
+        "SOIL_INIT=UNIFORM_TMELT",
+        "SOIL_INIT_OFFSET_K=0",
+    ])
+    .unwrap();
+    assert!(options.soil.validate(true, false).is_err());
+    // GPU U12 is checked separately against the existing native argument parser.
+}
+
+#[test]
+fn soil_runtime_initialization_context() {
+    use pi_snow_core::{Column, PhysicsOptions};
+    use runtime::{InitializationContext, Runtime};
+    let options = PhysicsOptions::from_settings([
+        "GROUND_BOUNDARY=SOIL_COLUMN",
+        "SOIL_PROPERTIES=MOIST_LOAM",
+        "SOIL_BOTTOM=DEEP_TBOT_8M",
+        "SOIL_TBOT_K=280",
+        "SOIL_INIT=AIR_PROFILE",
+        "SOIL_INIT_OFFSET_K=+3",
+    ])
+    .unwrap();
+    let mut snow = Column::bare_ground(273.15, 0.0, 0.0);
+    let context = InitializationContext {
+        mean_336h_k: None,
+        annual_mean_k: 280.0,
+    };
+    assert!(
+        Runtime::new(options.soil, context, &mut snow)
+            .unwrap_err()
+            .contains("336")
+    );
+    let context = InitializationContext {
+        mean_336h_k: Some(285.0),
+        ..context
+    };
+    let runtime = Runtime::new(options.soil, context, &mut snow).unwrap();
+    assert_eq!(
+        runtime.column.temperatures(),
+        SoilColumn::air_profile(Material::MoistLoam, 280.0, 285.0, 3.0).temperatures()
+    );
+    assert_eq!(
+        snow.node_temperature[0],
+        runtime.column.phase(0).temperature_k
+    );
+    assert_eq!(runtime.initial_graft_j_m2, 0.0);
+    assert_eq!(runtime.ledger_residual_j_m2(), 0.0);
+}

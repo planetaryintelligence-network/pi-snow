@@ -114,6 +114,7 @@ pub struct Data {
     pub maximum_row_ledger_residual_j_m2: f64,
     pub maximum_relative_soil_water_change: f64,
     pub phase_complementarity_failures: usize,
+    pub maximum_snow_mass_residual_kg_m2: f64,
     initial_water_kg_m2: [f64; 9],
 }
 
@@ -126,6 +127,7 @@ impl Data {
             maximum_row_ledger_residual_j_m2: 0.0,
             maximum_relative_soil_water_change: 0.0,
             phase_complementarity_failures: 0,
+            maximum_snow_mass_residual_kg_m2: 0.0,
             initial_water_kg_m2,
         }
     }
@@ -171,6 +173,24 @@ impl Data {
         self.output.accumulate(dt, top, bottom);
     }
 
+    pub fn assess_snow_mass(
+        &mut self,
+        before_mass: f64,
+        after_mass: f64,
+        before: crate::ledger::Interval,
+        after: crate::ledger::Interval,
+    ) {
+        let change = (after.solid_precipitation - before.solid_precipitation)
+            + (after.rain_to_pack - before.rain_to_pack)
+            + (after.deposition_applied - before.deposition_applied)
+            - (after.sublimation_applied - before.sublimation_applied)
+            - (after.runoff - before.runoff)
+            - (after.drained - before.drained);
+        self.maximum_snow_mass_residual_kg_m2 = self
+            .maximum_snow_mass_residual_kg_m2
+            .max((after_mass - before_mass - change).abs());
+    }
+
     /// Offset IDs distinguish soil nodes from the native snow node indices.
     pub fn crazy_temperature(&self, min: f64, max: f64) -> Option<(usize, f64)> {
         self.runtime
@@ -205,7 +225,7 @@ impl Data {
         let extended = self.output.extend_smet(native);
         let c = &self.runtime.counters;
         let metadata = format!(
-            "soil_bare_rows = {}\nsoil_snow_rows = {}\nsoil_certified_rows = {}\nsoil_uncertified_rows = {}\nsoil_predicate_not_computed_rows = {}\nsoil_multiple_roots = {}\nsoil_nonconvergences = {}\nsoil_newton_iterations = {}\nsoil_column_solves = {}\nsoil_budget_evaluations = {}\nsoil_bare_turbulence_calls = {}\nsoil_scan_resolve_solves = {}\nsoil_bare_seconds = {:.9}\nsoil_snow_seconds = {:.9}\nsoil_initial_graft_j_m2 = {:.9}\nsoil_max_row_ledger_residual_j_m2 = {:.9}\nsoil_max_bare_consistency_w_m2 = {:.9}\nsoil_bare_consistency_failures = {}\nsoil_max_coupled_ledger_residual_j_m2 = {:.9}\nsoil_max_phase_ledger_residual_j_m2 = {:.9}\nsoil_max_relative_water_change = {:.17e}\nsoil_phase_complementarity_failures = {}\n",
+            "soil_bare_rows = {}\nsoil_snow_rows = {}\nsoil_certified_rows = {}\nsoil_uncertified_rows = {}\nsoil_predicate_not_computed_rows = {}\nsoil_multiple_roots = {}\nsoil_nonconvergences = {}\nsoil_newton_iterations = {}\nsoil_column_solves = {}\nsoil_budget_evaluations = {}\nsoil_bare_turbulence_calls = {}\nsoil_scan_resolve_solves = {}\nsoil_bare_seconds = {:.9}\nsoil_snow_seconds = {:.9}\nsoil_initial_graft_j_m2 = {:.9}\nsoil_max_row_ledger_residual_j_m2 = {:.9}\nsoil_max_bare_consistency_w_m2 = {:.9}\nsoil_bare_consistency_failures = {}\nsoil_max_coupled_ledger_residual_j_m2 = {:.9}\nsoil_max_phase_ledger_residual_j_m2 = {:.9}\nsoil_max_relative_water_change = {:.17e}\nsoil_phase_complementarity_failures = {}\nsoil_max_snow_mass_residual_kg_m2 = {:.17e}\n",
             c.bare_rows,
             c.snow_rows,
             c.certified_rows,
@@ -227,7 +247,8 @@ impl Data {
             c.maximum_coupled_ledger_residual_j_m2,
             c.maximum_phase_ledger_residual_j_m2,
             self.maximum_relative_soil_water_change,
-            self.phase_complementarity_failures
+            self.phase_complementarity_failures,
+            self.maximum_snow_mass_residual_kg_m2
         );
         extended.replacen("[DATA]\n", &(metadata + "[DATA]\n"), 1)
     }

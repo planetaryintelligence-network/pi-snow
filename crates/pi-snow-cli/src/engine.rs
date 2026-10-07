@@ -1387,6 +1387,12 @@ fn run_with_options_and_diagnostics_and_deposition(
 
         if let Some(data) = soil.borrow_mut().as_mut() {
             data.finish_step(dt, soil_before.unwrap());
+            data.assess_snow_mass(
+                step_mass_before,
+                column.swe() + deposition.buffered() + column.surface_hoar_mass,
+                interval_before,
+                interval,
+            );
         }
         // 10. Accumulate, and write on the hour.
         acc.n += 1.0;

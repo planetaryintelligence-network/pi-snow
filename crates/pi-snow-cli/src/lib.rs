@@ -10,4 +10,5 @@ pub mod finite;
 pub mod ledger;
 pub mod meltout_candidate;
 pub mod meltout_diagnostic;
+pub mod soil_column;
 pub mod unit;

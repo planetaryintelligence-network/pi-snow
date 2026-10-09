@@ -9,6 +9,9 @@
 
 use std::fmt;
 
+#[path = "soil_options.rs"]
+pub mod soil;
+
 /// Irreducible water content of the bucket scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WaterRetention {
@@ -153,6 +156,8 @@ pub enum GroundBoundary {
     Phase2,
     /// Prescribed `GEO_HEAT` flux into snow, W m-2.
     GeoHeatFlux,
+    /// Prognostic registered one-metre column beneath the snow.
+    SoilColumn,
 }
 
 /// Whole-pack melt trigger registered by engine-meltout-v1.
@@ -203,6 +208,7 @@ pub struct PhysicsOptions {
     pub surface_linearisation: SurfaceLinearisation,
     pub thin_top_merge: ThinTopMerge,
     pub ground_boundary: GroundBoundary,
+    pub soil: soil::Settings,
     pub total_melt: TotalMelt,
     pub fresh_snow_density: FreshSnowDensity,
     pub dry_settlement: DrySettlement,
@@ -297,6 +303,7 @@ impl PhysicsOptions {
                 self.ground_boundary = match value {
                     "PHASE2" => GroundBoundary::Phase2,
                     "GEO_HEAT_FLUX" => GroundBoundary::GeoHeatFlux,
+                    "SOIL_COLUMN" => GroundBoundary::SoilColumn,
                     _ => return Err(bad()),
                 }
             }
@@ -337,6 +344,7 @@ impl PhysicsOptions {
                     _ => return Err(bad()),
                 }
             }
+            key if key.starts_with("SOIL_") => self.soil.set(key, value)?,
             _ => return Err(OptionError(format!("unknown physics option {key:?}"))),
         }
         Ok(())

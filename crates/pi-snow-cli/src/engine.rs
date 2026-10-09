@@ -50,6 +50,7 @@ use pi_snow_physics::thin_top_merge;
 use pi_snow_physics::turbulence::Scheme;
 use pi_snow_physics::water;
 use pi_snow_physics::wet_growth;
+use std::cell::RefCell;
 
 use crate::diagnostic::{Collector, DiagnosticMode, Refusal, RunDiagnostics, StepTrace};
 use crate::dirichlet_storage_diagnostic::DirichletStorageDiagnostic;
@@ -81,8 +82,18 @@ pub enum RunError {
     },
     #[error("{0}")]
     IncompatiblePhysics(&'static str),
+    #[error("invalid SOIL_COLUMN initialization: {0}")]
+    SoilInitialization(String),
     #[error("MERRA-2 deposition is missing for snow-covered step at {time}")]
     MissingDeposition { time: DateTime<Utc> },
+    /// Soil numerical failure is a separate registered stop class.
+    #[error("soil solver failure at time step {step} ({time}): {message}")]
+    SoilSolver {
+        step: usize,
+        time: DateTime<Utc>,
+        message: String,
+        partial: Box<RunOutput>,
+    },
     /// A NaN or infinity in the state or checked surface budget while the
     /// column holds snow. `partial` contains output through the last completed
     /// output interval; `step` counts forcing steps from 1.
@@ -128,6 +139,8 @@ pub struct RunOutput {
     pub dirichlet_storage_diagnostic: Option<String>,
     /// Full candidate physics ledger, enabled only in registered diagnostic runs.
     pub meltout_candidate_diagnostic: Option<String>,
+    /// Keyed hourly soil state and aggregate diagnostics.
+    pub soil: Option<crate::soil_column::output::Data>,
 }
 
 /// Hourly accumulators for fields the reference averages or sums.
@@ -175,7 +188,7 @@ pub fn run_with_options(
     end: DateTime<Utc>,
 ) -> Result<RunOutput, RunError> {
     run_with_options_and_diagnostics_and_deposition(
-        cfg, options, site, forcing, start, end, None, None,
+        cfg, options, site, forcing, start, end, None, None, None, None,
     )
 }
 
@@ -198,6 +211,8 @@ pub fn run_with_diagnostics(
         end,
         diagnostic_mode,
         None,
+        None,
+        None,
     )
 }
 
@@ -212,7 +227,58 @@ pub fn run_with_options_and_deposition(
     merra2: Option<&DepositionSeries>,
 ) -> Result<RunOutput, RunError> {
     run_with_options_and_diagnostics_and_deposition(
-        cfg, options, site, forcing, start, end, None, merra2,
+        cfg, options, site, forcing, start, end, None, merra2, None, None,
+    )
+}
+
+/// Replay a bound warm-up soil state beside the rig's original snow state.
+pub fn run_with_soil_state(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    diagnostic_mode: Option<DiagnosticMode>,
+    soil: crate::soil_column::SoilColumn,
+) -> Result<RunOutput, RunError> {
+    run_with_options_and_diagnostics_and_deposition(
+        cfg,
+        options,
+        site,
+        forcing,
+        start,
+        end,
+        diagnostic_mode,
+        None,
+        Some(soil),
+        None,
+    )
+}
+
+/// A5.3: the bound runner shares one predicate cache among a unit-season's arms.
+pub fn run_with_soil_cache(
+    cfg: &RunConfig,
+    options: &PhysicsOptions,
+    site: &Site,
+    forcing: &Smet,
+    start: Column,
+    end: DateTime<Utc>,
+    diagnostic_mode: Option<DiagnosticMode>,
+    initial_soil: Option<crate::soil_column::SoilColumn>,
+    cache: crate::soil_column::bare_cache::Shared,
+) -> Result<RunOutput, RunError> {
+    run_with_options_and_diagnostics_and_deposition(
+        cfg,
+        options,
+        site,
+        forcing,
+        start,
+        end,
+        diagnostic_mode,
+        None,
+        initial_soil,
+        Some(cache),
     )
 }
 
@@ -225,7 +291,35 @@ fn run_with_options_and_diagnostics_and_deposition(
     end: DateTime<Utc>,
     diagnostic_mode: Option<DiagnosticMode>,
     merra2: Option<&DepositionSeries>,
+    initial_soil: Option<crate::soil_column::SoilColumn>,
+    predicate_cache: Option<crate::soil_column::bare_cache::Shared>,
 ) -> Result<RunOutput, RunError> {
+    options
+        .soil
+        .validate(
+            options.ground_boundary == GroundBoundary::SoilColumn,
+            options.total_melt == TotalMelt::CrocusEq116,
+        )
+        .map_err(RunError::IncompatiblePhysics)?;
+    if (initial_soil.is_some() || predicate_cache.is_some())
+        && options.ground_boundary != GroundBoundary::SoilColumn
+    {
+        return Err(RunError::IncompatiblePhysics(
+            "replayed soil state requires GROUND_BOUNDARY=SOIL_COLUMN",
+        ));
+    }
+    if options.ground_boundary == GroundBoundary::SoilColumn
+        && [
+            "PI_SNOW_MELTOUT_DIAGNOSTICS",
+            "PI_SNOW_MELTOUT_CANDIDATE_DIAGNOSTICS",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|v| v == "1"))
+    {
+        return Err(RunError::IncompatiblePhysics(
+            "native melt-out boundary diagnostics do not describe SOIL_COLUMN",
+        ));
+    }
     let field = |name: &'static str| {
         forcing
             .field_index(name)
@@ -282,6 +376,24 @@ fn run_with_options_and_diagnostics_and_deposition(
     let pressure = pressure_at_altitude(site.altitude);
 
     let mut column = start;
+    let soil = RefCell::new(if options.ground_boundary == GroundBoundary::SoilColumn {
+        use crate::soil_column::{
+            output::Data,
+            runtime::{InitializationContext, Runtime},
+        };
+        let mut runtime = if let Some(state) = initial_soil {
+            Runtime::from_column(options.soil, state, &mut column)
+        } else {
+            let context = InitializationContext::from_forcing(options.soil, forcing)
+                .map_err(RunError::IncompatiblePhysics)?;
+            Runtime::new(options.soil, context, &mut column)
+        }
+        .map_err(RunError::SoilInitialization)?;
+        runtime.predicate_cache = predicate_cache;
+        Some(Data::new(runtime))
+    } else {
+        None
+    });
     let mut aoki_state = AokiAlbedo::default();
     if options.snow_albedo == SnowAlbedo::Aoki2003TempRate && !column.elements.is_empty() {
         aoki_state.start_pack();
@@ -338,28 +450,34 @@ fn run_with_options_and_diagnostics_and_deposition(
         std::env::var_os("PI_SNOW_MELTOUT_CANDIDATE_DIAGNOSTICS")
             .is_some_and(|value| value == "1")
             .then(MeltoutCandidateDiagnostic::new);
-    let make_output =
-        |rows: Vec<OutputRow>,
-         pro_text: String,
-         steps: usize,
-         ledger: Option<Ledger>,
-         diagnostics: Option<RunDiagnostics>,
-         density_events: Option<String>,
-         chan_csv: Option<String>,
-         meltout_diagnostic: Option<String>,
-         dirichlet_storage_diagnostic: Option<String>,
-         meltout_candidate_diagnostic: Option<String>| RunOutput {
-            smet: pi_snow_io::smet::write_output_smet_with_acdd(
-                &site.station_id,
-                &site.station_name,
-                site.latitude,
-                site.longitude,
-                site.altitude,
-                site.slope_angle,
-                site.slope_azimuth,
-                &rows,
-                cfg.acdd_write,
-            ),
+    let make_output = |rows: Vec<OutputRow>,
+                       pro_text: String,
+                       steps: usize,
+                       ledger: Option<Ledger>,
+                       diagnostics: Option<RunDiagnostics>,
+                       density_events: Option<String>,
+                       chan_csv: Option<String>,
+                       meltout_diagnostic: Option<String>,
+                       dirichlet_storage_diagnostic: Option<String>,
+                       meltout_candidate_diagnostic: Option<String>| {
+        let soil = soil.borrow().clone();
+        let smet = pi_snow_io::smet::write_output_smet_with_acdd(
+            &site.station_id,
+            &site.station_name,
+            site.latitude,
+            site.longitude,
+            site.altitude,
+            site.slope_angle,
+            site.slope_azimuth,
+            &rows,
+            cfg.acdd_write,
+        );
+        RunOutput {
+            smet: match soil.as_ref() {
+                Some(data) => data.extend_smet(&smet),
+                None => smet,
+            },
+            soil,
             pro: pro_text,
             steps,
             mass: ledger.map(Ledger::into_text),
@@ -369,7 +487,41 @@ fn run_with_options_and_diagnostics_and_deposition(
             meltout_diagnostic,
             dirichlet_storage_diagnostic,
             meltout_candidate_diagnostic,
+        }
+    };
+
+    // A failed keyed solve keeps completed intervals and its distinct stop class.
+    macro_rules! soil_try {
+        ($result:expr, $time:expr) => {
+            match $result {
+                Ok(value) => value,
+                Err(message) => {
+                    let partial = make_output(
+                        rows.clone(),
+                        pro_text.clone(),
+                        steps,
+                        ledger.take(),
+                        collector.as_ref().map(|c| c.report.clone()),
+                        density_events.clone(),
+                        chan_csv.clone(),
+                        meltout_diagnostic.as_ref().map(|d| d.clone().into_text()),
+                        dirichlet_storage_diagnostic
+                            .as_ref()
+                            .map(|d| d.clone().into_text()),
+                        meltout_candidate_diagnostic
+                            .as_ref()
+                            .map(|d| d.clone().into_text()),
+                    );
+                    return Err(RunError::SoilSolver {
+                        step: steps,
+                        time: $time,
+                        message,
+                        partial: Box::new(partial),
+                    });
+                }
+            }
         };
+    }
 
     for row in &forcing.rows {
         let t = row.timestamp;
@@ -395,6 +547,7 @@ fn run_with_options_and_diagnostics_and_deposition(
         let dw = v(i_dw).unwrap_or(NODATA);
         let psum = v(i_psum).unwrap_or(0.0).max(0.0);
         let tsg = i_tsg.and_then(v).unwrap_or(T_MELT);
+        let soil_before = soil.borrow().as_ref().map(|data| data.snapshot());
 
         // 1. Radiation on the slope.
         let mid = t - Duration::milliseconds((dt * 500.0) as i64);
@@ -504,6 +657,15 @@ fn run_with_options_and_diagnostics_and_deposition(
         let mut trace_surface_iterations = Vec::new();
         let mut trace_shortwave = 0.0;
 
+        if soil.borrow().is_some() {
+            let result = soil
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .runtime
+                .reconcile(&mut column);
+            soil_try!(result, t);
+        }
         let hs = column.snow_height();
         let params = SurfaceParameters {
             emissivity: surface::SNOW_EMISSIVITY,
@@ -524,8 +686,23 @@ fn run_with_options_and_diagnostics_and_deposition(
                 pressure,
                 rain_rate: 0.0,
             };
-            column.node_temperature[0] = tsg;
-            (surface::budget(&atm, &params, tsg), site.soil_albedo, 0.0)
+            if soil.borrow().is_some() {
+                let atm = Atmosphere {
+                    absorbed_shortwave: (1.0 - site.soil_albedo) * iswr,
+                    rain_rate: liquid / dt,
+                    ..atm
+                };
+                let result = soil
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .bare_step_for_row(&mut column, dt, &atm, &params, t.timestamp());
+                (soil_try!(result, t), site.soil_albedo, 0.0)
+            } else {
+                column.node_temperature[0] = tsg;
+                (surface::budget(&atm, &params, tsg), site.soil_albedo, 0.0)
+            }
         } else {
             // 3. Shortwave through the pack.
             let absorbed = if options.snow_albedo == SnowAlbedo::Aoki2003TempRate {
@@ -599,11 +776,48 @@ fn run_with_options_and_diagnostics_and_deposition(
             let ground = match options.ground_boundary {
                 GroundBoundary::Phase2 => Ground::Temperature(tsg),
                 GroundBoundary::GeoHeatFlux => Ground::Flux(cfg.geo_heat),
+                GroundBoundary::SoilColumn => Ground::Flux(0.0), // Unused by the coupled branch.
             };
             let record_linearisation = options.ground_boundary != GroundBoundary::Phase2
                 || options.total_melt != TotalMelt::Phase2
                 || meltout_candidate_diagnostic.is_some();
-            let (b, linear_a, linear_b, solved_surface_temperature) = if record_linearisation {
+            let soil_top_before = soil
+                .borrow()
+                .as_ref()
+                .map(|data| data.runtime.top_energy_j_m2);
+            let (b, linear_a, linear_b, solved_surface_temperature) = if soil.borrow().is_some() {
+                let mut observer = |iteration| trace_surface_iterations.push(iteration);
+                let tracing = matches!(diagnostic_mode, Some(DiagnosticMode::Trace));
+                let result = soil
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .snow_step_observed(
+                        &mut column,
+                        dt,
+                        &atm,
+                        &params,
+                        &absorbed.per_element,
+                        absorbed.to_ground,
+                        conductivity,
+                        options.surface_linearisation,
+                        if tracing { Some(&mut observer) } else { None },
+                    );
+                let b = soil_try!(result, t);
+                if matches!(diagnostic_mode, Some(DiagnosticMode::Trace)) {
+                    trace_post_solve_nodes = column.node_temperature.clone();
+                    trace_shortwave = atm.absorbed_shortwave;
+                }
+                let (a, linear_b) = soil
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .runtime
+                    .last_snow_linearisation
+                    .unwrap();
+                (b, a, linear_b, *column.node_temperature.last().unwrap())
+            } else if record_linearisation {
                 if options.surface_linearisation != SurfaceLinearisation::Phase2 {
                     return Err(RunError::IncompatiblePhysics(
                         "engine-meltout diagnostics require SURFACE_LINEARISATION=PHASE2",
@@ -668,7 +882,12 @@ fn run_with_options_and_diagnostics_and_deposition(
                 deposition.buffered(),
             );
             let sources: f64 = absorbed.per_element.iter().sum();
-            let qg0 = (thermal::internal_energy(&column) - before) / dt - b.total - sources;
+            let qg0 = if let Some(top_before) = soil_top_before {
+                -(soil.borrow().as_ref().unwrap().runtime.top_energy_j_m2 - top_before) / dt
+                    + absorbed.to_ground
+            } else {
+                (thermal::internal_energy(&column) - before) / dt - b.total - sources
+            };
             let thermal_residual =
                 (thermal::internal_energy(&column) - before) - (b.total + sources + qg0) * dt;
             let nonlinear_surface =
@@ -757,7 +976,17 @@ fn run_with_options_and_diagnostics_and_deposition(
             // 5. Phase change and water.
             let water_before: Vec<f64> = column.elements.iter().map(Element::water_mass).collect();
             let n_before = column.elements.len();
-            let pc = water::phase_change(&mut column);
+            let pc = if soil.borrow().is_some() {
+                let result = soil
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .phase_change(&mut column);
+                soil_try!(result, t)
+            } else {
+                water::phase_change(&mut column)
+            };
             if column.elements.len() == n_before {
                 for (e, w) in column.elements.iter_mut().zip(water_before) {
                     if e.water_mass() < w - 1e-9 {
@@ -765,7 +994,17 @@ fn run_with_options_and_diagnostics_and_deposition(
                     }
                 }
             }
-            let runoff = water::cascade_with(&mut column, options.water_retention);
+            let runoff = if soil.borrow().is_some() {
+                let result = soil
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .runtime
+                    .cascade(&mut column, options.water_retention);
+                soil_try!(result, t)
+            } else {
+                water::cascade_with(&mut column, options.water_retention)
+            };
             acc.runoff += pc.drained + runoff;
             interval.drained += pc.drained;
             interval.runoff += runoff;
@@ -928,6 +1167,9 @@ fn run_with_options_and_diagnostics_and_deposition(
                     match options.ground_boundary {
                         GroundBoundary::Phase2 => "DIRICHLET",
                         GroundBoundary::GeoHeatFlux => "GEO_HEAT_FLUX",
+                        GroundBoundary::SoilColumn => {
+                            unreachable!("soil dispatch precedes native solve")
+                        }
                     },
                     if options.ground_boundary == GroundBoundary::GeoHeatFlux {
                         cfg.geo_heat
@@ -972,6 +1214,15 @@ fn run_with_options_and_diagnostics_and_deposition(
             (b, absorbed.albedo, qg0)
         };
 
+        if soil.borrow().is_some() {
+            let result = soil
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .runtime
+                .reconcile(&mut column);
+            soil_try!(result, t);
+        }
         let current_min = column
             .node_temperature
             .iter()
@@ -984,7 +1235,12 @@ fn run_with_options_and_diagnostics_and_deposition(
             .iter()
             .enumerate()
             .find(|(_, value)| **value < cfg.t_crazy_min || **value > cfg.t_crazy_max)
-            .map(|(node, value)| (node, *value));
+            .map(|(node, value)| (node, *value))
+            .or_else(|| {
+                soil.borrow()
+                    .as_ref()
+                    .and_then(|data| data.crazy_temperature(cfg.t_crazy_min, cfg.t_crazy_max))
+            });
 
         if let Some(collector) = collector.as_mut() {
             if crazy.is_none() {
@@ -1130,12 +1386,13 @@ fn run_with_options_and_diagnostics_and_deposition(
         // remain exempt to preserve Phase 2's vanishing-pack output.
         // Validated configurations have zero soil elements; if soil elements
         // are introduced, revisit this empty-column scope.
-        if let Some(field) = (!column.elements.is_empty())
+        if let Some(field) = (!column.elements.is_empty() || soil.borrow().is_some())
             .then(|| {
                 crate::finite::column(&column)
                     .or_else(|| crate::finite::budget(&budget, deposition.buffered()))
             })
             .flatten()
+            .or_else(|| soil.borrow().as_ref().and_then(|data| data.nonfinite()))
         {
             if let Some(collector) = collector.as_mut() {
                 collector.report.refusal = Some(Refusal {
@@ -1172,6 +1429,15 @@ fn run_with_options_and_diagnostics_and_deposition(
             });
         }
 
+        if let Some(data) = soil.borrow_mut().as_mut() {
+            data.finish_step(dt, soil_before.unwrap());
+            data.assess_snow_mass(
+                step_mass_before,
+                column.swe() + deposition.buffered() + column.surface_hoar_mass,
+                interval_before,
+                interval,
+            );
+        }
         // 10. Accumulate, and write on the hour.
         acc.n += 1.0;
         acc.seconds += dt;
@@ -1194,6 +1460,9 @@ fn run_with_options_and_diagnostics_and_deposition(
         if first_output || on_the_hour {
             first_output = false;
             rows.push(output_row(t, &acc, &column, ta, rh, vw, dw, tsg, options));
+            if let Some(data) = soil.borrow_mut().as_mut() {
+                data.output.push(t, &data.runtime.column);
+            }
             pro_text.push_str(&pro::write_timestep(&profile(t, &column, options)));
             acc = Accum::default();
             if let Some(l) = ledger.as_mut() {

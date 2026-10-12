@@ -96,3 +96,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_fallback;
+
+#[cfg(test)]
+mod tests_zeta;

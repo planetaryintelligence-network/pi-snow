@@ -99,3 +99,6 @@ mod tests_fallback;
 
 #[cfg(test)]
 mod tests_zeta;
+
+#[cfg(test)]
+mod tests_capture;

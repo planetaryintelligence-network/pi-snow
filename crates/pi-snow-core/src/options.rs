@@ -87,6 +87,17 @@ pub enum SurfaceLayer {
     ZetaLimitClm5,
 }
 
+/// Treatment of the CLM5 z/L limit at neutral (engine-soil-spinup-v2). Only
+/// valid with `SURFACE_LAYER=ZETA_LIMIT_CLM5`; the engines refuse it otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SurfaceLayerNeutral {
+    /// The transplant's own limit: z/L held to 0.01..2 or -100..-0.01.
+    #[default]
+    Native,
+    /// z/L held to -100..2, continuous through neutral.
+    Continuous,
+}
+
 /// Snow-surface reflectance and its aging law.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SnowAlbedo {
@@ -202,6 +213,7 @@ pub struct PhysicsOptions {
     pub mass_report: MassReport,
     pub turbulence: Turbulence,
     pub surface_layer: SurfaceLayer,
+    pub surface_layer_neutral: SurfaceLayerNeutral,
     pub snow_albedo: SnowAlbedo,
     pub wet_grain_growth: WetGrainGrowth,
     pub sublimation_melt_out: SublimationMeltOut,
@@ -274,6 +286,12 @@ impl PhysicsOptions {
                     "PHASE2" => SurfaceLayer::Phase2,
                     "SCALAR_HEIGHT_NEUTRAL_WIND" => SurfaceLayer::ScalarHeightNeutralWind,
                     "ZETA_LIMIT_CLM5" => SurfaceLayer::ZetaLimitClm5,
+                    _ => return Err(bad()),
+                }
+            }
+            "SURFACE_LAYER_NEUTRAL" => {
+                self.surface_layer_neutral = match value {
+                    "CONTINUOUS" => SurfaceLayerNeutral::Continuous,
                     _ => return Err(bad()),
                 }
             }

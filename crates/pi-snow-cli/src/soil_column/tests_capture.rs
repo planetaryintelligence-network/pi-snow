@@ -104,12 +104,78 @@ fn column(c: &Capture) -> SoilColumn {
     s
 }
 
+struct Outcome {
+    name: String,
+    bracket: [u64; 2],
+    collapse_reproduced: bool,
+    bracket_equal: bool,
+    zn_accepted: bool,
+    residual: f64,
+    fallback_entries: usize,
+}
+
+fn outcome(path: &std::path::Path) -> Outcome {
+    let c = parse(&std::fs::read_to_string(path).unwrap());
+    // (a) the original failure is preserved: same scheme, collapses again.
+    let mut soil = column(&c);
+    let (collapse_reproduced, bracket_equal) =
+        match bare::step(&mut soil, c.dt, c.bottom, &c.atm, &c.params) {
+            Err(f) => (
+                f.message == bare_fallback::COLLAPSED,
+                f.diagnostics.failure_bracket_bits == Some(c.bracket),
+            ),
+            Ok(_) => (false, false),
+        };
+    // (b) under ZN the same inputs have a root the unchanged tolerance accepts.
+    assert_ne!(c.scheme, Scheme::MoHoltslagZetaContinuous);
+    let params = SurfaceParameters {
+        scheme: Scheme::MoHoltslagZetaContinuous,
+        ..c.params
+    };
+    let mut soil = column(&c);
+    let (zn_accepted, residual, fallback_entries) =
+        match bare::step(&mut soil, c.dt, c.bottom, &c.atm, &params) {
+            Ok(r) => (
+                r.flux_residual_w_m2.abs() <= 1e-6,
+                r.flux_residual_w_m2,
+                r.diagnostics.fallback_entries,
+            ),
+            Err(_) => (false, f64::NAN, 0),
+        };
+    Outcome {
+        name: path.file_name().unwrap().to_string_lossy().into_owned(),
+        bracket: c.bracket,
+        collapse_reproduced,
+        bracket_equal,
+        zn_accepted,
+        residual,
+        fallback_entries,
+    }
+}
+
+/// Reads `$SOIL_V2_CAPTURES` and the six retained bracket pairs from
+/// `$SOIL_V2_RETAINED_BRACKETS` (decimal `lo hi` per line). Exactly six
+/// captures, whose bracket pairs equal the retained six. All six (a) and (b)
+/// outcomes are collected and printed before anything is asserted, so a first
+/// failure does not hide the other five.
 #[test]
 fn retained_collapse_cases() {
     let Ok(dir) = std::env::var("SOIL_V2_CAPTURES") else {
         eprintln!("SOIL_V2_CAPTURES unset: Z-T6 runs in S2 on the capture build's output");
         return;
     };
+    let retained_file = std::env::var("SOIL_V2_RETAINED_BRACKETS")
+        .expect("SOIL_V2_RETAINED_BRACKETS must name the file of retained bracket pairs");
+    let mut retained: Vec<[u64; 2]> = std::fs::read_to_string(&retained_file)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let mut it = l.split_whitespace().map(|x| x.parse::<u64>().unwrap());
+            [it.next().unwrap(), it.next().unwrap()]
+        })
+        .collect();
+    retained.sort();
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -119,34 +185,40 @@ fn retained_collapse_cases() {
         })
         .collect();
     files.sort();
-    assert!(!files.is_empty(), "no captures under {dir}");
-    for path in files {
-        let c = parse(&std::fs::read_to_string(&path).unwrap());
-        // (a) the original failure is preserved: same scheme, collapses again.
-        let mut soil = column(&c);
-        let failure = bare::step(&mut soil, c.dt, c.bottom, &c.atm, &c.params).unwrap_err();
-        assert_eq!(failure.message, bare_fallback::COLLAPSED, "{path:?}");
-        assert_eq!(
-            failure.diagnostics.failure_bracket_bits,
-            Some(c.bracket),
-            "{path:?}"
-        );
-        // (b) under ZN the same inputs have a root the unchanged tolerance accepts.
-        assert_ne!(c.scheme, Scheme::MoHoltslagZetaContinuous);
-        let params = SurfaceParameters {
-            scheme: Scheme::MoHoltslagZetaContinuous,
-            ..c.params
-        };
-        let mut soil = column(&c);
-        let report = bare::step(&mut soil, c.dt, c.bottom, &c.atm, &params)
-            .unwrap_or_else(|e| panic!("{path:?}: ZN did not accept: {}", e.message));
-        assert!(report.flux_residual_w_m2.abs() <= 1e-6, "{path:?}");
+    let outcomes: Vec<Outcome> = files.iter().map(|p| outcome(p)).collect();
+    for o in &outcomes {
         println!(
-            "Z-T6 {:?}: collapse reproduced; ZN accepted, residual {:e}, fallback entries {}",
-            path.file_name().unwrap(),
-            report.flux_residual_w_m2,
-            report.diagnostics.fallback_entries
+            "Z-T6-ROW file={} bracket={}:{} collapse_reproduced={} bracket_equal={} zn_accepted={} residual={:e} fallback_entries={}",
+            o.name,
+            o.bracket[0],
+            o.bracket[1],
+            o.collapse_reproduced,
+            o.bracket_equal,
+            o.zn_accepted,
+            o.residual,
+            o.fallback_entries
         );
+    }
+    let mut got: Vec<[u64; 2]> = outcomes.iter().map(|o| o.bracket).collect();
+    got.sort();
+    println!(
+        "Z-T6-SUMMARY captures={} retained={}",
+        outcomes.len(),
+        retained.len()
+    );
+    assert_eq!(outcomes.len(), 6, "exactly six captures are registered");
+    assert_eq!(
+        got, retained,
+        "capture bracket pairs differ from the six retained pairs"
+    );
+    for o in &outcomes {
+        assert!(
+            o.collapse_reproduced,
+            "{}: transplant collapse not reproduced",
+            o.name
+        );
+        assert!(o.bracket_equal, "{}: collapsed bracket bits differ", o.name);
+        assert!(o.zn_accepted, "{}: ZN did not accept", o.name);
     }
 }
 

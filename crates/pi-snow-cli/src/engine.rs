@@ -22,8 +22,8 @@ use chrono::{DateTime, Duration, Timelike, Utc};
 use pi_snow_core::constants::{LH_FUSION, NODATA, RHO_WATER, T_MELT};
 use pi_snow_core::options::{
     DrySettlement, FreshSnowDensity, GrainClassification, GroundBoundary, MassReport, S5Index,
-    SnowAlbedo, SublimationMeltOut, SurfaceLayer, SurfaceLinearisation, TotalMelt, Turbulence,
-    WetGrainGrowth,
+    SnowAlbedo, SublimationMeltOut, SurfaceLayer, SurfaceLayerNeutral, SurfaceLinearisation,
+    TotalMelt, Turbulence, WetGrainGrowth,
 };
 use pi_snow_core::{Column, Element, PhysicsOptions};
 use pi_snow_io::ini::{NewSnowDensity, RunConfig, Stability};
@@ -334,12 +334,22 @@ fn run_with_options_and_diagnostics_and_deposition(
         (Turbulence::FromIni, Stability::MoHoltslag) => Scheme::MoHoltslag,
         (Turbulence::FromIni, Stability::Richardson) => Scheme::Louis,
     };
+    if options.surface_layer_neutral != SurfaceLayerNeutral::Native
+        && options.surface_layer != SurfaceLayer::ZetaLimitClm5
+    {
+        return Err(RunError::IncompatiblePhysics(
+            "SURFACE_LAYER_NEUTRAL requires SURFACE_LAYER=ZETA_LIMIT_CLM5",
+        ));
+    }
     let scheme = match (options.surface_layer, scheme) {
         (SurfaceLayer::Phase2, s) => s,
         (SurfaceLayer::ScalarHeightNeutralWind, Scheme::MoHoltslag) => {
             Scheme::MoHoltslagScalarHeight
         }
-        (SurfaceLayer::ZetaLimitClm5, Scheme::MoHoltslag) => Scheme::MoHoltslagZetaLimited,
+        (SurfaceLayer::ZetaLimitClm5, Scheme::MoHoltslag) => match options.surface_layer_neutral {
+            SurfaceLayerNeutral::Native => Scheme::MoHoltslagZetaLimited,
+            SurfaceLayerNeutral::Continuous => Scheme::MoHoltslagZetaContinuous,
+        },
         _ => {
             return Err(RunError::IncompatiblePhysics(
                 "SURFACE_LAYER other than PHASE2 needs ATMOSPHERIC_STABILITY = MO_HOLTSLAG and no TURBULENCE key",

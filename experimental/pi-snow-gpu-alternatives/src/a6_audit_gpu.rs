@@ -255,6 +255,9 @@ fn kernel_scheme_parameters(scheme: Scheme, density_scheme: DensityScheme) -> Re
         Scheme::MoHoltslagZetaLimited => {
             bail!("stability scheme MoHoltslagZetaLimited is not ported to the GPU")
         }
+        Scheme::MoHoltslagZetaContinuous => {
+            bail!("stability scheme MoHoltslagZetaContinuous is not ported to the GPU")
+        }
     };
     let density = match density_scheme {
         DensityScheme::Pahaut => 0.0,
@@ -335,7 +338,11 @@ mod tests {
 
     #[test]
     fn unsupported_physics_schemes_are_refused() {
-        for scheme in [Scheme::MoHoltslagScalarHeight, Scheme::MoHoltslagZetaLimited] {
+        for scheme in [
+            Scheme::MoHoltslagScalarHeight,
+            Scheme::MoHoltslagZetaLimited,
+            Scheme::MoHoltslagZetaContinuous,
+        ] {
             let error = kernel_scheme_parameters(scheme, DensityScheme::Pahaut).unwrap_err();
             assert!(error.to_string().contains(&format!("{scheme:?}")));
             assert!(error.to_string().contains("not ported to the GPU"));

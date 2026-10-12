@@ -36,6 +36,9 @@ pub enum Scheme {
     MoHoltslagScalarHeight,
     /// `MoHoltslag` with z/L bounded as CLM5 does (`surface_layer::zeta_limited`).
     MoHoltslagZetaLimited,
+    /// `MoHoltslagZetaLimited` with the limit continuous through neutral
+    /// (`zeta_limit_continuous::zeta_continuous`), engine-soil-spinup-v2.
+    MoHoltslagZetaContinuous,
 }
 
 /// The state of the surface layer at one instant.
@@ -122,6 +125,9 @@ pub fn fluxes(layer: &SurfaceLayer, scheme: Scheme) -> Fluxes {
         Scheme::Louis => louis(layer, rho, mean_t),
         Scheme::MoHoltslagScalarHeight => crate::surface_layer::scalar_height(layer, rho, mean_t),
         Scheme::MoHoltslagZetaLimited => crate::surface_layer::zeta_limited(layer, rho, mean_t),
+        Scheme::MoHoltslagZetaContinuous => {
+            crate::zeta_limit_continuous::zeta_continuous(layer, rho, mean_t)
+        }
     }
 }
 

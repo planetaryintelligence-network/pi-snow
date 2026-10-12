@@ -67,6 +67,11 @@ pub struct Diagnostics {
     pub computed_budget_evaluations: usize,
     pub newton_iterations: usize,
     pub nonconvergences: usize,
+    /// Post-failure bisection (v1 A9); all zero on every converging row.
+    pub fallback_entries: usize,
+    pub fallback_iterations: usize,
+    pub fallback_failures: usize,
+    pub failure_bracket_bits: Option<[u64; 2]>,
 }
 
 impl Diagnostics {
@@ -193,6 +198,7 @@ fn solve_inner(
     if trial(lo, diagnostics)?.0 > 0.0 || trial(hi, diagnostics)?.0 < 0.0 {
         return Err("bare-soil balance has no bracket in [210,340] K".into());
     }
+    let (lo0, hi0) = (lo, hi);
     let lower = super::solver::surface_stiffness_lower_bound(&entry, dt, bottom);
     let maximum = if let Some(value) = samples.as_ref().and_then(|s| s.maximum_slope) {
         diagnostics.budget_evaluations += 2602;
@@ -294,5 +300,20 @@ fn solve_inner(
             0.5 * (lo + hi)
         };
     }
-    Err("bare-soil safeguarded solve failed after 100 iterations".into())
+    // The Newton loop has exhausted its cap without accepting. Bisect the
+    // saved original bracket; nothing above this line has changed.
+    let (q, residual, (column, report)) =
+        super::bare_fallback::bisect(lo0, hi0, diagnostics, |q, d| {
+            trial(q, d).map(|(r, c, report)| (r, (c, report)))
+        })?;
+    if let Some(scan) = &mut diagnostics.scan {
+        scan.assess(Some(column.phase(0)));
+    }
+    *soil = column;
+    Ok(BareReport {
+        soil: report,
+        surface_flux_w_m2: q,
+        flux_residual_w_m2: residual,
+        diagnostics: Diagnostics::default(),
+    })
 }

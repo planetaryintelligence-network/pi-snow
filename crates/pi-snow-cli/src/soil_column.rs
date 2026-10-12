@@ -3,6 +3,7 @@
 
 pub mod bare;
 pub mod bare_cache;
+pub mod bare_fallback;
 pub mod bare_scan;
 pub mod coupled;
 pub mod coupled_diagnostic;
@@ -92,3 +93,6 @@ impl SoilColumn {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_fallback;

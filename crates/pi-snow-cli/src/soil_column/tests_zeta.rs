@@ -66,7 +66,11 @@ fn bare_budget_uses_the_continuous_scheme_it_is_given() {
         };
         let direct = turbulence::fluxes(&layer, Scheme::MoHoltslagZetaContinuous);
         assert_eq!(b.sensible.to_bits(), direct.sensible.to_bits());
-        let probe = SurfaceLayer { q_air: 1.0, q_surface: 0.0, ..layer };
+        let probe = SurfaceLayer {
+            q_air: 1.0,
+            q_surface: 0.0,
+            ..layer
+        };
         let rho = air_density(80_000.0, 0.5 * (t_air + ts));
         let exchange =
             turbulence::fluxes(&probe, Scheme::MoHoltslagZetaContinuous).vapour_mass / rho;
@@ -101,7 +105,9 @@ fn bare_balance_jumps_under_the_transplant_and_not_under_the_continuous_scheme()
         transplant_min = transplant_min.min(step(Scheme::MoHoltslagZetaLimited));
         continuous_max = continuous_max.max(step(Scheme::MoHoltslagZetaContinuous));
     }
-    println!("balance step at T_s = T_a: transplant min {transplant_min:e}, continuous max {continuous_max:e} W/m2");
+    println!(
+        "balance step at T_s = T_a: transplant min {transplant_min:e}, continuous max {continuous_max:e} W/m2"
+    );
     // The A9 acceptance tolerance is 1e-6 W/m2 and a collapse needs a step
     // above 2e-6. The transplant steps by watts; the continuous scheme by
     // far less than the tolerance.
@@ -117,7 +123,10 @@ fn predicate_cache_keeps_the_two_schemes_apart() {
     let a = guard.row(7, &atm, &params(Scheme::MoHoltslagZetaLimited));
     a.maximum_slope = Some(1.25);
     let b = guard.row(7, &atm, &params(Scheme::MoHoltslagZetaContinuous));
-    assert_eq!(b.maximum_slope, None, "continuous scheme served the transplant's row");
+    assert_eq!(
+        b.maximum_slope, None,
+        "continuous scheme served the transplant's row"
+    );
     b.maximum_slope = Some(2.5);
     let a_again = guard.row(7, &atm, &params(Scheme::MoHoltslagZetaLimited));
     assert_eq!(a_again.maximum_slope, Some(1.25));

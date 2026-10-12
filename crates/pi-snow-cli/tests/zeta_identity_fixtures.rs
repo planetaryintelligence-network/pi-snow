@@ -98,7 +98,6 @@ fn end() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 4, 30, 0, 0, 0).unwrap()
 }
 
-
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -111,21 +110,37 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 const CASES: [(&str, &[&str]); 5] = [
     ("default", &[]),
     ("clm5", &["SURFACE_LAYER=ZETA_LIMIT_CLM5"]),
-    ("scalar_height", &["SURFACE_LAYER=SCALAR_HEIGHT_NEUTRAL_WIND"]),
+    (
+        "scalar_height",
+        &["SURFACE_LAYER=SCALAR_HEIGHT_NEUTRAL_WIND"],
+    ),
     (
         "clm5_aoki",
-        &["SURFACE_LAYER=ZETA_LIMIT_CLM5", "SNOW_ALBEDO=AOKI2003_TEMP_RATE"],
+        &[
+            "SURFACE_LAYER=ZETA_LIMIT_CLM5",
+            "SNOW_ALBEDO=AOKI2003_TEMP_RATE",
+        ],
     ),
     (
         "clm5_remove_element",
-        &["SURFACE_LAYER=ZETA_LIMIT_CLM5", "SUBLIMATION_MELT_OUT=REMOVE_ELEMENT"],
+        &[
+            "SURFACE_LAYER=ZETA_LIMIT_CLM5",
+            "SUBLIMATION_MELT_OUT=REMOVE_ELEMENT",
+        ],
     ),
 ];
 
 fn digest(settings: &[&str]) -> String {
     let options = PhysicsOptions::from_settings(settings.iter().copied()).unwrap();
-    let out = run_with_options(&config(), &options, &site(), &forcing(), start_column(), end())
-        .unwrap();
+    let out = run_with_options(
+        &config(),
+        &options,
+        &site(),
+        &forcing(),
+        start_column(),
+        end(),
+    )
+    .unwrap();
     format!(
         "smet {} {:016x} pro {} {:016x}",
         out.smet.len(),
@@ -144,17 +159,36 @@ fn print_digests() {
 }
 
 const EXPECTED: [(&str, &str); 5] = [
-    ("default", "smet 152870 2c1cb01eb4f5cd21 pro 877928 8d7d9a8f1ef619d1"),
-    ("clm5", "smet 152870 811fc654f25cd594 pro 870720 f59ca93f93028167"),
-    ("scalar_height", "smet 152870 48443d19664232f6 pro 869230 5d405c0a47f2e814"),
-    ("clm5_aoki", "smet 152870 748ac2b72afb5c38 pro 873501 cb499f7eb6a43196"),
-    ("clm5_remove_element", "smet 152870 811fc654f25cd594 pro 870720 f59ca93f93028167"),
+    (
+        "default",
+        "smet 152870 2c1cb01eb4f5cd21 pro 877928 8d7d9a8f1ef619d1",
+    ),
+    (
+        "clm5",
+        "smet 152870 811fc654f25cd594 pro 870720 f59ca93f93028167",
+    ),
+    (
+        "scalar_height",
+        "smet 152870 48443d19664232f6 pro 869230 5d405c0a47f2e814",
+    ),
+    (
+        "clm5_aoki",
+        "smet 152870 748ac2b72afb5c38 pro 873501 cb499f7eb6a43196",
+    ),
+    (
+        "clm5_remove_element",
+        "smet 152870 811fc654f25cd594 pro 870720 f59ca93f93028167",
+    ),
 ];
 
 #[test]
 fn zc_key_off_identity() {
     for ((name, settings), (ename, expected)) in CASES.iter().zip(EXPECTED.iter()) {
         assert_eq!(name, ename);
-        assert_eq!(&digest(settings), expected, "{name} differs from main ebaf93bf");
+        assert_eq!(
+            &digest(settings),
+            expected,
+            "{name} differs from main ebaf93bf"
+        );
     }
 }

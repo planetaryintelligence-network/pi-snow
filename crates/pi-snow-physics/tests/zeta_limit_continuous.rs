@@ -6,9 +6,7 @@
 //! (plan: at least 400). Heights are 10 m wind and 2 m scalars.
 
 use pi_snow_core::constants::{LH_SUBLIMATION, LH_VAPORISATION};
-use pi_snow_physics::atmosphere::{
-    specific_humidity, vapour_pressure_ice, vapour_pressure_water,
-};
+use pi_snow_physics::atmosphere::{specific_humidity, vapour_pressure_ice, vapour_pressure_water};
 use pi_snow_physics::turbulence::{self, Fluxes, Scheme, SurfaceLayer};
 
 const WINDS: [f64; 7] = [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0];
@@ -34,7 +32,13 @@ fn fixtures() -> Vec<Fixture> {
             for &c in &AIR_C {
                 for &pressure in &PRESSURES {
                     for &z0 in &Z0S {
-                        v.push(Fixture { wind, rh, t_air: 273.15 + c, pressure, z0 });
+                        v.push(Fixture {
+                            wind,
+                            rh,
+                            t_air: 273.15 + c,
+                            pressure,
+                            z0,
+                        });
                     }
                 }
             }
@@ -66,7 +70,11 @@ fn layer(f: &Fixture, t_surface: f64) -> SurfaceLayer {
 }
 
 fn latent(f: &Fixture, x: &Fluxes) -> f64 {
-    let l = if f.t_air >= 273.15 { LH_VAPORISATION } else { LH_SUBLIMATION };
+    let l = if f.t_air >= 273.15 {
+        LH_VAPORISATION
+    } else {
+        LH_SUBLIMATION
+    };
     l * x.vapour_mass
 }
 
@@ -153,9 +161,14 @@ fn clm5_jump_is_exercised() {
         n += 1;
         lo = lo.min(rel);
         hi = hi.max(rel);
-        assert!(rel > 1e-3, "no step on a fixture the plan says exercises it: {rel:e}");
+        assert!(
+            rel > 1e-3,
+            "no step on a fixture the plan says exercises it: {rel:e}"
+        );
     }
-    println!("Z-T3 CLM5 latent step: {n} fixtures, relative step min {lo:e} max {hi:e} (P2 band 0.5 to 1.5 %)");
+    println!(
+        "Z-T3 CLM5 latent step: {n} fixtures, relative step min {lo:e} max {hi:e} (P2 band 0.5 to 1.5 %)"
+    );
     assert!(n >= 100, "too few fixtures exercise the clamp: {n}");
 }
 
@@ -163,7 +176,9 @@ fn clm5_jump_is_exercised() {
 #[test]
 fn zc_agrees_away_from_neutral() {
     let (mut n, mut worst) = (0_usize, 0.0_f64);
-    let offsets = [-30.0, -10.0, -3.0, -1.0, -0.4, -0.15, 0.15, 0.4, 1.0, 3.0, 10.0, 30.0];
+    let offsets = [
+        -30.0, -10.0, -3.0, -1.0, -0.4, -0.15, 0.15, 0.4, 1.0, 3.0, 10.0, 30.0,
+    ];
     for f in fixtures().into_iter().step_by(3) {
         for &d in &offsets {
             let l = layer(&f, f.t_air + d);
@@ -174,7 +189,9 @@ fn zc_agrees_away_from_neutral() {
             }
             let k = turbulence::fluxes(&l, Scheme::MoHoltslagZetaLimited);
             let denom = k.sensible.abs().max(k.vapour_mass.abs() * 2.8e6).max(1e-12);
-            let diff = (c.sensible - k.sensible).abs().max((c.vapour_mass - k.vapour_mass).abs() * 2.8e6);
+            let diff = (c.sensible - k.sensible)
+                .abs()
+                .max((c.vapour_mass - k.vapour_mass).abs() * 2.8e6);
             n += 1;
             worst = worst.max(diff / denom);
         }
@@ -191,15 +208,30 @@ fn zc_bounds_and_finiteness() {
     let dts = [-60.0, -20.0, -5.0, -0.5, 0.0, 0.5, 5.0, 20.0, 60.0];
     for &wind in &winds {
         for &dt in &dts {
-            let f = Fixture { wind, rh: 0.5, t_air: 268.0, pressure: 80_000.0, z0: 2e-3 };
+            let f = Fixture {
+                wind,
+                rh: 0.5,
+                t_air: 268.0,
+                pressure: 80_000.0,
+                z0: 2e-3,
+            };
             let x = turbulence::fluxes(&layer(&f, 268.0 + dt), Scheme::MoHoltslagZetaContinuous);
             assert!(x.sensible.is_finite() && x.vapour_mass.is_finite() && x.u_star.is_finite());
             let zeta = 10.0 / x.obukhov_length;
-            assert!(zeta >= -100.0 - 1e-9 && zeta <= 2.0 + 1e-9, "wind {wind} dt {dt}: {zeta}");
+            assert!(
+                zeta >= -100.0 - 1e-9 && zeta <= 2.0 + 1e-9,
+                "wind {wind} dt {dt}: {zeta}"
+            );
         }
     }
     // Calm-wind bypass is the dispatcher's, and unchanged.
-    let f = Fixture { wind: 0.0, rh: 0.5, t_air: 268.0, pressure: 80_000.0, z0: 2e-3 };
+    let f = Fixture {
+        wind: 0.0,
+        rh: 0.5,
+        t_air: 268.0,
+        pressure: 80_000.0,
+        z0: 2e-3,
+    };
     let x = turbulence::fluxes(&layer(&f, 270.0), Scheme::MoHoltslagZetaContinuous);
     assert_eq!((x.sensible, x.vapour_mass, x.u_star), (0.0, 0.0, 0.0));
     assert!(x.obukhov_length.is_infinite());
@@ -242,6 +274,12 @@ fn zc_neutral_is_a_kink_not_a_jump() {
         "slope jump at neutral: ZN {worst_zn:e}, plain MO {worst_mo:e} W/m2/K; \
          worst relative ZN vs MO {worst_rel:e}; worst |ratio - 10| {scale_worst:e}"
     );
-    assert!(worst_rel <= 1e-3, "kink differs from plain MO: {worst_rel:e}");
-    assert!(scale_worst <= 1.0, "second difference does not scale with the step: {scale_worst}");
+    assert!(
+        worst_rel <= 1e-3,
+        "kink differs from plain MO: {worst_rel:e}"
+    );
+    assert!(
+        scale_worst <= 1.0,
+        "second difference does not scale with the step: {scale_worst}"
+    );
 }

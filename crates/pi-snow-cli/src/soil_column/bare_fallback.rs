@@ -66,7 +66,11 @@ mod tests {
         assert_eq!(failure, COLLAPSED);
         assert_eq!(d.failure_bracket_bits, Some([lo.to_bits(), hi.to_bits()]));
         assert_eq!(
-            (d.fallback_entries, d.fallback_iterations, d.fallback_failures),
+            (
+                d.fallback_entries,
+                d.fallback_iterations,
+                d.fallback_failures
+            ),
             (1, 0, 1)
         );
     }

@@ -102,11 +102,16 @@ fn end() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 4, 30, 0, 0, 0).unwrap()
 }
 
-
-
 fn run_with(settings: &[&str]) -> Result<pi_snow_cli::engine::RunOutput, RunError> {
     let options = PhysicsOptions::from_settings(settings.iter().copied()).unwrap();
-    run_with_options(&config(), &options, &site(), &forcing(), start_column(), end())
+    run_with_options(
+        &config(),
+        &options,
+        &site(),
+        &forcing(),
+        start_column(),
+        end(),
+    )
 }
 
 #[test]
@@ -114,11 +119,17 @@ fn engine_refuses_the_key_without_zeta_limit_clm5() {
     for other in [
         &["SURFACE_LAYER_NEUTRAL=CONTINUOUS"][..],
         &["SURFACE_LAYER=PHASE2", "SURFACE_LAYER_NEUTRAL=CONTINUOUS"],
-        &["SURFACE_LAYER_NEUTRAL=CONTINUOUS", "SURFACE_LAYER=SCALAR_HEIGHT_NEUTRAL_WIND"],
+        &[
+            "SURFACE_LAYER_NEUTRAL=CONTINUOUS",
+            "SURFACE_LAYER=SCALAR_HEIGHT_NEUTRAL_WIND",
+        ],
     ] {
         match run_with(other) {
             Err(RunError::IncompatiblePhysics(m)) => {
-                assert!(m.contains("SURFACE_LAYER_NEUTRAL requires SURFACE_LAYER=ZETA_LIMIT_CLM5"), "{m}")
+                assert!(
+                    m.contains("SURFACE_LAYER_NEUTRAL requires SURFACE_LAYER=ZETA_LIMIT_CLM5"),
+                    "{m}"
+                )
             }
             Err(e) => panic!("{other:?}: wrong error {e:?}"),
             Ok(_) => panic!("{other:?}: ran"),
@@ -138,12 +149,23 @@ fn engine_refuses_the_key_with_louis_like_clm5() {
 
 #[test]
 fn engine_runs_continuous_in_either_order_and_matches_itself() {
-    let a = run_with(&["SURFACE_LAYER=ZETA_LIMIT_CLM5", "SURFACE_LAYER_NEUTRAL=CONTINUOUS"]).unwrap();
-    let b = run_with(&["SURFACE_LAYER_NEUTRAL=CONTINUOUS", "SURFACE_LAYER=ZETA_LIMIT_CLM5"]).unwrap();
+    let a = run_with(&[
+        "SURFACE_LAYER=ZETA_LIMIT_CLM5",
+        "SURFACE_LAYER_NEUTRAL=CONTINUOUS",
+    ])
+    .unwrap();
+    let b = run_with(&[
+        "SURFACE_LAYER_NEUTRAL=CONTINUOUS",
+        "SURFACE_LAYER=ZETA_LIMIT_CLM5",
+    ])
+    .unwrap();
     assert_eq!(a.smet, b.smet);
     assert_eq!(a.pro, b.pro);
     let native = run_with(&["SURFACE_LAYER=ZETA_LIMIT_CLM5"]).unwrap();
-    println!("continuous smet differs from native CLM5 on this fixture: {}", a.smet != native.smet);
+    println!(
+        "continuous smet differs from native CLM5 on this fixture: {}",
+        a.smet != native.smet
+    );
 }
 
 #[test]
@@ -184,9 +206,16 @@ fn candidate_engine_maps_and_refuses_like_the_main_engine() {
     };
     assert!(go(&native).is_ok());
     assert!(go(&cont).is_ok());
-    assert!(matches!(go(&alone), Err(candidate::RunError::IncompatiblePhysics(_))));
+    assert!(matches!(
+        go(&alone),
+        Err(candidate::RunError::IncompatiblePhysics(_))
+    ));
     // The candidate engine and the main engine give the same continuous run.
-    let main = run_with(&["SURFACE_LAYER=ZETA_LIMIT_CLM5", "SURFACE_LAYER_NEUTRAL=CONTINUOUS"]).unwrap();
+    let main = run_with(&[
+        "SURFACE_LAYER=ZETA_LIMIT_CLM5",
+        "SURFACE_LAYER_NEUTRAL=CONTINUOUS",
+    ])
+    .unwrap();
     let cand = go(&cont).unwrap();
     assert_eq!(main.smet, cand.smet);
 }

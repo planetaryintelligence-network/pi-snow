@@ -146,7 +146,11 @@ fn converging_rows_have_zero_fallback_counters() {
         let r = bare::step(&mut soil, 600.0, Bottom::Geothermal005, &a, &p).unwrap();
         let d = &r.diagnostics;
         assert_eq!(
-            (d.fallback_entries, d.fallback_iterations, d.fallback_failures),
+            (
+                d.fallback_entries,
+                d.fallback_iterations,
+                d.fallback_failures
+            ),
             (0, 0, 0)
         );
         assert_eq!(d.failure_bracket_bits, None);
@@ -170,7 +174,10 @@ fn adjacent_jump_through_the_full_solver_is_a_failed_defined_row() {
     assert_eq!(failure.message, bare_fallback::COLLAPSED);
     let d = failure.diagnostics;
     assert_eq!(d.newton_iterations, 100);
-    assert_eq!((d.fallback_entries, d.fallback_failures, d.nonconvergences), (1, 1, 1));
+    assert_eq!(
+        (d.fallback_entries, d.fallback_failures, d.nonconvergences),
+        (1, 1, 1)
+    );
     assert_eq!(soil.enthalpy.map(f64::to_bits), before.map(f64::to_bits));
     let [lo, hi] = d.failure_bracket_bits.unwrap();
     assert_eq!(lo + 1, hi);

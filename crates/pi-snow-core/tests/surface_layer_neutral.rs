@@ -4,7 +4,10 @@ use pi_snow_core::options::{PhysicsOptions, SnowAlbedo, SurfaceLayer, SurfaceLay
 
 #[test]
 fn key_absent_is_native_and_default() {
-    assert_eq!(PhysicsOptions::default().surface_layer_neutral, SurfaceLayerNeutral::Native);
+    assert_eq!(
+        PhysicsOptions::default().surface_layer_neutral,
+        SurfaceLayerNeutral::Native
+    );
     let o = PhysicsOptions::from_settings(["SURFACE_LAYER=ZETA_LIMIT_CLM5"]).unwrap();
     assert_eq!(o.surface_layer_neutral, SurfaceLayerNeutral::Native);
 }
@@ -28,9 +31,18 @@ fn continuous_parses_in_either_order_and_sets_no_surface_layer_value() {
 
 #[test]
 fn unknown_values_and_misspelt_values_refuse() {
-    for v in ["NATIVE", "PHASE2", "", "continuous", "ZETA_LIMIT_CONTINUOUS"] {
+    for v in [
+        "NATIVE",
+        "PHASE2",
+        "",
+        "continuous",
+        "ZETA_LIMIT_CONTINUOUS",
+    ] {
         let setting = format!("SURFACE_LAYER_NEUTRAL={v}");
-        assert!(PhysicsOptions::from_settings([setting.as_str()]).is_err(), "{v:?}");
+        assert!(
+            PhysicsOptions::from_settings([setting.as_str()]).is_err(),
+            "{v:?}"
+        );
     }
     // No value is added to SURFACE_LAYER itself (plan A1.1).
     assert!(PhysicsOptions::from_settings(["SURFACE_LAYER=ZETA_LIMIT_CONTINUOUS"]).is_err());

@@ -31,10 +31,18 @@ fn zc_matches_linearise_golden() {
     let mut r = Rng(0x2026_1012_5011_5eed);
     let mut checked = 0;
     for i in 0..10_000 {
-        let wind = if i % 500 == 0 { 0.0 } else { 0.05 + 15.0 * r.next() };
+        let wind = if i % 500 == 0 {
+            0.0
+        } else {
+            0.05 + 15.0 * r.next()
+        };
         let t_air = 250.0 + 50.0 * r.next();
         let dt = -30.0 + 60.0 * r.next();
-        let near = if i % 7 == 0 { 1e-6 * (r.next() - 0.5) } else { dt };
+        let near = if i % 7 == 0 {
+            1e-6 * (r.next() - 0.5)
+        } else {
+            dt
+        };
         let t_surface = t_air + near;
         let z0 = (2e-4f64.ln() + (1e-2f64.ln() - 2e-4f64.ln()) * r.next()).exp();
         let pressure = 60_000.0 + 40_000.0 * r.next();

@@ -162,9 +162,12 @@ fn engine_runs_continuous_in_either_order_and_matches_itself() {
     assert_eq!(a.smet, b.smet);
     assert_eq!(a.pro, b.pro);
     let native = run_with(&["SURFACE_LAYER=ZETA_LIMIT_CLM5"]).unwrap();
-    println!(
-        "continuous smet differs from native CLM5 on this fixture: {}",
-        a.smet != native.smet
+    // The key must select the continuous scheme, not silently stay on the
+    // transplant (soil-v2-s1-opus-1 R4). On this fixture the clamp binds, so the
+    // output differs: smet 70f11ffd... against 811fc654... in the reviewer's run.
+    assert_ne!(
+        a.smet, native.smet,
+        "SURFACE_LAYER_NEUTRAL=CONTINUOUS did not change the engine"
     );
 }
 
@@ -204,8 +207,12 @@ fn candidate_engine_maps_and_refuses_like_the_main_engine() {
     let go = |o: &PhysicsOptions| {
         candidate::run_with_options(&config(), o, &csite, &forcing(), start_column(), end())
     };
-    assert!(go(&native).is_ok());
-    assert!(go(&cont).is_ok());
+    let native_run = go(&native).unwrap();
+    let cont_run = go(&cont).unwrap();
+    assert_ne!(
+        native_run.smet, cont_run.smet,
+        "the candidate engine's mapping did not select the continuous scheme"
+    );
     assert!(matches!(
         go(&alone),
         Err(candidate::RunError::IncompatiblePhysics(_))

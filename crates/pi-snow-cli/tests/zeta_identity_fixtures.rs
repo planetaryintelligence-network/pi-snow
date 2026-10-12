@@ -4,6 +4,8 @@
 //! `ebaf93bf` byte for byte. The expected digests below were produced by this
 //! file's own `print_digests` test run on a clean checkout of `ebaf93bf`
 //! (which has no neutral key), on the fixture `tests/fixtures/snowpack.ini`
+//! (`rust/crates/pi-snow-cli/tests/fixtures/snowpack.ini`, SHA-256
+//! 892c3bd0b3b0bb10b69f789753f22b9b704769769f469b3c12c6a5560b6da4a6)
 //! with the ten-day forcing built in `engine_surface.rs`, whose air
 //! temperature crosses the snow surface temperature daily.
 //!

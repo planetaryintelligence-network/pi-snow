@@ -73,6 +73,9 @@ pub struct Counters {
     pub multiple_roots: usize,
     pub nonconvergences: usize,
     pub newton_iterations: usize,
+    pub bare_fallback_rows: usize,
+    pub bare_fallback_iterations: usize,
+    pub bare_fallback_failures: usize,
     pub column_solves: usize,
     /// Bare budget calls, including the final output budget.
     pub budget_evaluations: usize,
@@ -213,6 +216,9 @@ impl Runtime {
         }
         self.counters.nonconvergences += diagnostics.nonconvergences;
         self.counters.newton_iterations += diagnostics.newton_iterations;
+        self.counters.bare_fallback_rows += diagnostics.fallback_entries;
+        self.counters.bare_fallback_iterations += diagnostics.fallback_iterations;
+        self.counters.bare_fallback_failures += diagnostics.fallback_failures;
         self.counters.column_solves += diagnostics.column_solves;
         self.counters.budget_evaluations += diagnostics.budget_evaluations;
         self.counters.computed_budget_evaluations += diagnostics.computed_budget_evaluations;

@@ -38,6 +38,7 @@ impl PredicateCache {
             Scheme::Louis => 1,
             Scheme::MoHoltslagScalarHeight => 2,
             Scheme::MoHoltslagZetaLimited => 3,
+            Scheme::MoHoltslagZetaContinuous => 4,
         };
         let bits = [
             a.t_air.to_bits(),

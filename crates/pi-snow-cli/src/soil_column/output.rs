@@ -271,6 +271,16 @@ impl Data {
             c.computed_budget_evaluations,
             c.computed_bare_turbulence_calls
         );
-        extended.replacen("[DATA]\n", &(metadata + &a5 + "[DATA]\n"), 1)
+        // Only a run that entered the post-failure bisection carries these
+        // lines, so every other header is byte-identical to the pre-A9 tree.
+        let a9 = if c.bare_fallback_rows > 0 {
+            format!(
+                "soil_bare_fallback_rows = {}\nsoil_bare_fallback_iterations = {}\nsoil_bare_fallback_failures = {}\n",
+                c.bare_fallback_rows, c.bare_fallback_iterations, c.bare_fallback_failures
+            )
+        } else {
+            String::new()
+        };
+        extended.replacen("[DATA]\n", &(metadata + &a5 + &a9 + "[DATA]\n"), 1)
     }
 }

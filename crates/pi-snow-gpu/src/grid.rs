@@ -27,6 +27,10 @@ pub struct GridArgs {
     pub nmax: usize,
     pub out_dir: PathBuf,
     pub threads: usize,
+    /// The `nonfinite_scan` block (A2.2) and, when `--batch auto` chose the width, the `batch_auto` block (A2.3),
+    /// as JSON object text; recorded in every batch's JSON.
+    pub nonfinite_scan_json: String,
+    pub batch_auto_json: Option<String>,
 }
 
 /// Rows of season day `day` (0-based): the hourly intervals ending in that day, and the
@@ -154,10 +158,12 @@ pub fn run(gpu: &Gpu, args: &GridArgs) -> Result<()> {
         write_atomic(&stem.with_extension("tsv"), tsv.as_bytes())?;
         let wall = t0.elapsed().as_secs_f64();
         let json = format!(
-            "{{\"batch\": {bi}, \"columns\": {b}, \"nmax\": {}, \"days\": {DAYS}, \"daily_layout\": \"little-endian f64 [day][HS, SWE, TSS, water, n, fail][column]\", \"seconds\": {{\"wall\": {wall:.3}, \"read_and_fill\": {t_read:.3}, \"host_rows\": {t_prep:.3}, \"gpu_upload_and_kernel\": {t_gpu:.3}}}, \"device_bytes_batch\": {}, \"device_free_before\": {free_before}, \"device_free_after_alloc\": {free_after}, \"device_total\": {total}, \"engine\": {}}}\n",
+            "{{\"batch\": {bi}, \"columns\": {b}, \"nmax\": {}, \"days\": {DAYS}, \"daily_layout\": \"little-endian f64 [day][HS, SWE, TSS, water, n, fail][column]\", \"seconds\": {{\"wall\": {wall:.3}, \"read_and_fill\": {t_read:.3}, \"host_rows\": {t_prep:.3}, \"gpu_upload_and_kernel\": {t_gpu:.3}}}, \"device_bytes_batch\": {}, \"device_free_before\": {free_before}, \"device_free_after_alloc\": {free_after}, \"device_total\": {total}, \"engine\": {}, \"nonfinite_scan\": {}, \"batch_auto\": {}}}\n",
             args.nmax,
             batch.device_bytes(),
-            gpu.build.to_json()
+            gpu.build.to_json(),
+            args.nonfinite_scan_json,
+            args.batch_auto_json.as_deref().unwrap_or("null")
         );
         write_atomic(&stem.with_extension("json"), json.as_bytes())?;
         eprintln!(

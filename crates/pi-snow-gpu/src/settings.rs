@@ -59,6 +59,9 @@ pub fn validated_on_json() -> String {
 
 /// Whether the running build is the one the identity and ratio claims were measured on: arch, driver, NVRTC, F32
 /// and a PTX hash equal to the U1 record's for this kernel. A reader sees from the JSON whether the claim applies.
+/// The arch term compares the compile target (`gpu::ARCH`, a constant), not the device's compute capability, and the GPU
+/// model is not checked, so that term is always true; driver, NVRTC and the PTX hash are read or computed live and carry
+/// the check that matters for K1h's empirical identity.
 pub fn matches_validated_setup(build: &crate::gpu::Build, kernel: Kernel) -> bool {
     build.precision == Precision::F32
         && build.arch == VALIDATED_ARCH
@@ -360,6 +363,8 @@ pub fn select_auto(precision: Precision, broker: &BrokerState, live: &Live, tabl
         .iter()
         .map(|w| {
             let dev = sized.then(|| device_gib_for(w.width));
+            // No recorded peak RSS means no host figure: fit is unknown (None) and `auto` refuses rather than guesses.
+            // Latent: the shipped table gives the base width its A2.3 figure.
             let ram = if sized { ram_gib_for(w) } else { None };
             Candidate {
                 width: w.width,

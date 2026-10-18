@@ -265,15 +265,16 @@ fn grid(args: &[String]) -> Result<()> {
         "F32K" => Precision::F32K,
         other => bail!("bad precision {other}"),
     };
-    let scan = NonfiniteScan::parse(o.get("--nonfinite-scan").map(String::as_str).unwrap_or("every-step"), settings::HOURLY_OFFERED)?;
+    let scan = NonfiniteScan::parse(o.get("--nonfinite-scan").map(String::as_str).unwrap_or(settings::DEFAULT_NONFINITE_SCAN), settings::HOURLY_OFFERED)?;
     let kernel = scan.kernel(precision)?;
-    let batch_setting = BatchSetting::parse(o.get("--batch").map(String::as_str).unwrap_or("auto"))?;
+    let batch_setting = BatchSetting::parse(o.get("--batch").map(String::as_str).unwrap_or(settings::DEFAULT_BATCH))?;
     let gpu = Gpu::with_kernel(precision, kernel)?;
-    let nonfinite_scan_json = scan.run_json(kernel, &gpu.build.source_sha256);
+    let matches_validated = settings::matches_validated_setup(&gpu.build, kernel);
+    let nonfinite_scan_json = scan.run_json(kernel, &gpu.build.source_sha256, matches_validated);
     let (batch, batch_auto_json, reserve) = match batch_setting {
         BatchSetting::Fixed(n) => {
-            let (dev, ram) = settings::reserve_for_fixed(n, &settings::VALIDATED_WIDTHS);
-            (n, None, (dev, ram))
+            let (dev, ram) = settings::reserve_for_fixed(precision, n, &settings::VALIDATED_WIDTHS);
+            (n, None, (dev, ram, (precision != Precision::F32).then_some(settings::F32_ONLY_SIZES)))
         }
         BatchSetting::Auto => {
             let home = std::env::var("HOME").unwrap_or_default();
@@ -281,16 +282,17 @@ fn grid(args: &[String]) -> Result<()> {
             let state = settings::broker_state(&machine, &machine.join("MACHINE_STATUS.md"), chrono::Utc::now());
             let live = Live { gpu_free_bytes: gpu.mem_info()?.0 as u64, ram_available_kib: settings::read_meminfo_available_kib()? };
             let choice = settings::select_auto(precision, &state, &live, &settings::VALIDATED_WIDTHS)?;
-            (choice.chosen, Some(choice.run_json()), (choice.reserve_gpu_gib, Some(choice.reserve_ram_gib)))
+            (choice.chosen, Some(choice.run_json(matches_validated)), (choice.reserve_gpu_gib, choice.reserve_ram_gib, choice.note))
         }
     };
     eprintln!("grid: nonfinite-scan {} (kernel {}), batch {batch}", scan.label(), kernel.label());
     if dry_run {
         println!(
-            "{{\"nonfinite_scan\": {nonfinite_scan_json}, \"batch\": {batch}, \"batch_auto\": {}, \"reserve_to_post\": {{\"gpu_gib\": {:.2}, \"ram_gib\": {}}}}}",
+            "{{\"nonfinite_scan\": {nonfinite_scan_json}, \"batch\": {batch}, \"batch_auto\": {}, \"reserve_to_post\": {{\"gpu_gib\": {}, \"ram_gib\": {}, \"note\": {}}}}}",
             batch_auto_json.as_deref().unwrap_or("null"),
-            reserve.0,
-            reserve.1.map_or("null".to_string(), |r| format!("{r:.2}"))
+            reserve.0.map_or("null".to_string(), |r| format!("{r:.2}")),
+            reserve.1.map_or("null".to_string(), |r| format!("{r:.2}")),
+            reserve.2.map_or("null".to_string(), |n| format!("\"{n}\""))
         );
         return Ok(());
     }

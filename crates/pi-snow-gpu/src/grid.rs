@@ -78,11 +78,75 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    text.find(marker).map(|i| &text[i + marker.len()..])
+}
+
+/// The string value of `"key": "..."` first found after `marker` in a hand-built JSON text.
+fn string_after(text: &str, marker: &str, key: &str) -> Option<String> {
+    let rest = after(after(text, marker)?, &format!("\"{key}\": \""))?;
+    Some(rest[..rest.find('"')?].to_string())
+}
+
+fn columns_of(text: &str) -> Option<usize> {
+    let rest = after(text, "\"columns\": ")?;
+    rest[..rest.find(|c: char| !c.is_ascii_digit())?].parse().ok()
+}
+
+/// The setting, kernel and precision a batch JSON (or this run) records. A directory written before the settings
+/// existed has no `nonfinite_scan` block: it ran the pinned kernel.
+fn identity_of(batch_json: &str, engine_marker: &str) -> (String, String, String) {
+    let setting = string_after(batch_json, "\"nonfinite_scan\": {", "setting").unwrap_or_else(|| "(absent)".into());
+    let kernel = string_after(batch_json, "\"nonfinite_scan\": {", "kernel").unwrap_or_else(|| "pinned".into());
+    let precision = string_after(batch_json, engine_marker, "precision").unwrap_or_else(|| "?".into());
+    (setting, kernel, precision)
+}
+
+/// Refuse to resume an output directory whose finished batches were written at another width or with another
+/// setting: a restart skips every batch whose JSON exists, so a different width (the `auto` budget moves) would drop
+/// columns without an error, and a different kernel or precision would mix engines in one directory.
+pub fn check_resume(out_dir: &Path, n_pixels: usize, batch: usize, nonfinite_scan_json: &str, engine_json: &str) -> Result<()> {
+    if !out_dir.is_dir() {
+        return Ok(());
+    }
+    let mine = identity_of(&format!("\"nonfinite_scan\": {nonfinite_scan_json}, \"engine\": {engine_json}"), "\"engine\": {");
+    let mut names: Vec<_> = std::fs::read_dir(out_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("batch-") && n.ends_with(".json"))
+        .collect();
+    names.sort();
+    for name in names {
+        let Ok(bi) = name["batch-".len()..name.len() - ".json".len()].parse::<usize>() else { continue };
+        let text = std::fs::read_to_string(out_dir.join(&name))?;
+        let (columns, theirs) = (columns_of(&text), identity_of(&text, "\"engine\": {"));
+        let expected = n_pixels.saturating_sub(bi * batch).min(batch);
+        let width_ok = columns == Some(expected) && expected > 0;
+        // A directory from before the settings existed has no setting to compare: it ran the pinned kernel, so only
+        // the kernel and precision must agree.
+        let same_engine = theirs.1 == mine.1 && theirs.2 == mine.2 && (theirs.0 == "(absent)" || theirs.0 == mine.0);
+        if !width_ok || !same_engine {
+            bail!(
+                "{} was written by a run with {} columns in {name} and setting {}, kernel {}, precision {}; this run has width {batch}, \
+                 setting {}, kernel {}, precision {} and would expect {expected} columns there. Resuming would skip batches and drop or mix \
+                 columns: pass --batch {} (and the same --nonfinite-scan and --precision) to resume, or use a new --out",
+                out_dir.display(),
+                columns.map_or("?".to_string(), |c| c.to_string()),
+                theirs.0, theirs.1, theirs.2,
+                mine.0, mine.1, mine.2,
+                columns.map_or("N".to_string(), |c| c.to_string())
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn run(gpu: &Gpu, args: &GridArgs) -> Result<()> {
     let options = PhysicsOptions::default();
     let pixels = forcing::read_pixels(&args.forcing_dir.join("pixels.tsv"))?;
     let template = std::fs::read_to_string(&args.ini_template)?;
     let cfg = RunConfig::from_ini(&Ini::parse(&forcing::ini_text(&template, "px")?)?)?;
+    check_resume(&args.out_dir, args.pixels.len(), args.batch, &args.nonfinite_scan_json, &gpu.build.to_json())?;
     std::fs::create_dir_all(&args.out_dir)?;
     let forcing_path = args.forcing_dir.join("forcing.f32");
     for (bi, chunk) in args.pixels.chunks(args.batch).enumerate() {

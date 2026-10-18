@@ -38,6 +38,9 @@ fn auto(precision: Precision, broker: &BrokerState, l: &Live) -> anyhow::Result<
 
 #[test]
 fn scan_default_and_values() {
+    // The default (A2.4; ships.nonfinite_scan_default of the Phase F record is every-step) parses to every-step.
+    assert_eq!(DEFAULT_NONFINITE_SCAN, "every-step");
+    assert_eq!(NonfiniteScan::parse(DEFAULT_NONFINITE_SCAN, HOURLY_OFFERED).unwrap(), NonfiniteScan::EveryStep);
     assert_eq!(NonfiniteScan::parse("every-step", false).unwrap(), NonfiniteScan::EveryStep);
     assert_eq!(NonfiniteScan::parse("hourly", true).unwrap(), NonfiniteScan::Hourly);
     assert_eq!(NonfiniteScan::EveryStep.label(), "every-step");
@@ -90,14 +93,14 @@ fn kernel_files_are_the_ones_phase_f_measured() {
 
 #[test]
 fn scan_run_json_carries_the_a2_2_fields() {
-    let j = NonfiniteScan::EveryStep.run_json(Kernel::K1h, &Kernel::K1h.source_sha256());
+    let j = NonfiniteScan::EveryStep.run_json(Kernel::K1h, &Kernel::K1h.source_sha256(), true);
     for part in ["\"setting\": \"every-step\"", "\"kernel\": \"k1h\"", "\"kernel_source_sha256\": \"3cfaf22b", "\"equivalent_to_pinned\": true"] {
         assert!(j.contains(part), "{j}");
     }
-    let j = NonfiniteScan::Hourly.run_json(Kernel::K2, &Kernel::K2.source_sha256());
+    let j = NonfiniteScan::Hourly.run_json(Kernel::K2, &Kernel::K2.source_sha256(), false);
     assert!(j.contains("\"equivalent_to_pinned\": false") && j.contains("\"setting\": \"hourly\""), "{j}");
     // At F64 every-step runs the pinned kernel and says so.
-    let j = NonfiniteScan::EveryStep.run_json(Kernel::Pinned, &Kernel::Pinned.source_sha256());
+    let j = NonfiniteScan::EveryStep.run_json(Kernel::Pinned, &Kernel::Pinned.source_sha256(), false);
     assert!(j.contains("\"kernel\": \"pinned\"") && j.contains("fe12cefa"), "{j}");
 }
 
@@ -112,6 +115,9 @@ fn help_labels_hourly_non_equivalent_and_says_there_is_no_off() {
 
 #[test]
 fn batch_parses_numbers_and_auto_only() {
+    // The default (A2.4) is auto.
+    assert_eq!(DEFAULT_BATCH, "auto");
+    assert_eq!(BatchSetting::parse(DEFAULT_BATCH).unwrap(), BatchSetting::Auto);
     assert_eq!(BatchSetting::parse("auto").unwrap(), BatchSetting::Auto);
     assert_eq!(BatchSetting::parse("16384").unwrap(), BatchSetting::Fixed(16384));
     for bad in ["0", "-1", "Auto", "", "1e4", "16384.0", "wide"] {
@@ -179,12 +185,13 @@ fn auto_takes_the_widest_validated_width_when_everything_fits() {
     assert_eq!(c.chosen, 83_232);
     assert_eq!(c.source, "broker");
     assert_eq!(c.candidates.len(), 3, "every validated width is listed");
-    assert!(c.candidates.iter().all(|x| x.fits));
+    assert!(c.candidates.iter().all(|x| x.fits == Some(true)));
     assert_eq!(c.device_bytes_per_column, 182_424);
     assert!(c.reason.contains("smallest median GPU-line ratio"), "{}", c.reason);
     // The reserve to post: 83,232 columns at 182,424 B plus 1.5 GiB, and 26.7 GiB of RSS plus the 4 GiB margin.
-    assert!((c.reserve_gpu_gib - 15.64).abs() < 0.01, "{}", c.reserve_gpu_gib);
-    assert!((c.reserve_ram_gib - 30.70).abs() < 0.01, "{}", c.reserve_ram_gib);
+    let (rg, rr) = (c.reserve_gpu_gib.unwrap(), c.reserve_ram_gib.unwrap());
+    assert!((rg - 15.64).abs() < 0.01, "{rg}");
+    assert!((rr - 30.70).abs() < 0.01, "{rr}");
 }
 
 #[test]
@@ -257,7 +264,7 @@ fn a_stale_broker_returns_16384_with_the_conservative_source() {
     assert_eq!(c.chosen, 16_384);
     assert_eq!(c.source, "broker-stale, conservative");
     assert!(c.reason.contains("stale"), "{}", c.reason);
-    assert!(c.run_json().contains("\"source\": \"broker-stale, conservative\""));
+    assert!(c.run_json(true).contains("\"source\": \"broker-stale, conservative\""));
 }
 
 #[test]
@@ -266,24 +273,31 @@ fn no_broker_uses_the_live_readings_alone() {
     assert_eq!(c.chosen, 83_232);
     assert_eq!(c.source, "live-only");
     assert_eq!(c.gpu_budget_gib, None);
-    assert!(c.run_json().contains("\"gpu_budget_gib\": null"));
+    assert!(c.run_json(true).contains("\"gpu_budget_gib\": null"));
     // The live readings still bind.
     assert_eq!(auto(Precision::F32, &BrokerState::Absent, &live(9.0, 62.0)).unwrap().chosen, 32_768);
 }
 
 #[test]
-fn f64_and_mix_return_16384_with_the_f32_only_reason() {
+fn f64_and_mix_return_16384_with_the_f32_only_reason_and_null_sizes() {
     for p in [Precision::F64, Precision::Mix, Precision::F32K] {
         let c = auto(p, &fresh(23.0, 61.0), &live(30.0, 62.0)).unwrap();
         assert_eq!(c.chosen, 16_384, "{p:?}");
         assert_eq!(c.reason, "width validated at F32 only");
+        // The device and host sizes are F32 figures: off F32 they are null, and so is every fits flag.
+        assert_eq!((c.reserve_gpu_gib, c.reserve_ram_gib), (None, None), "{p:?}");
+        assert_eq!(c.note, Some("sizes measured at F32 only"));
+        assert!(c.candidates.iter().all(|x| x.device_gib_needed.is_none() && x.ram_gib_needed.is_none() && x.fits.is_none()));
+        let j = c.run_json(false);
+        assert!(j.contains("\"fits\": null") && !j.contains("\"fits\": true") && !j.contains("\"fits\": false"), "{j}");
+        assert!(j.contains("\"device_gib_needed\": null") && j.contains("\"note\": \"sizes measured at F32 only\""), "{j}");
     }
 }
 
 #[test]
 fn auto_run_json_has_every_a2_3_field() {
     let c = auto(Precision::F32, &fresh(23.0, 61.0), &live(30.9, 62.0)).unwrap();
-    let j = c.run_json();
+    let j = c.run_json(true);
     for key in [
         "gpu_free_gib", "gpu_budget_gib", "ram_available_gib", "source", "device_bytes_per_column", "ram_gib_per_column",
         "candidates", "chosen", "reason",
@@ -300,12 +314,16 @@ fn auto_run_json_has_every_a2_3_field() {
 
 #[test]
 fn fixed_width_dry_run_reports_the_device_estimate_and_the_validated_host_figure() {
-    let (dev, ram) = reserve_for_fixed(32_768, &VALIDATED_WIDTHS);
-    assert!((dev - 7.07).abs() < 0.01, "{dev}");
+    let (dev, ram) = reserve_for_fixed(Precision::F32, 32_768, &VALIDATED_WIDTHS);
+    assert!((dev.unwrap() - 7.07).abs() < 0.01, "{dev:?}");
     assert!((ram.unwrap() - 14.68).abs() < 0.01, "{ram:?}");
     // A width Phase F did not measure has a device estimate and no host figure.
-    let (_, ram) = reserve_for_fixed(20_000, &VALIDATED_WIDTHS);
-    assert!(ram.is_none());
+    let (dev, ram) = reserve_for_fixed(Precision::F32, 20_000, &VALIDATED_WIDTHS);
+    assert!(dev.is_some() && ram.is_none());
+    // Off F32 both are null: the sizes were measured at F32 only.
+    for p in [Precision::F64, Precision::Mix, Precision::F32K] {
+        assert_eq!(reserve_for_fixed(p, 16_384, &VALIDATED_WIDTHS), (None, None), "{p:?}");
+    }
 }
 
 // ---- the PTX each kernel compiles to (NVRTC only, no device) ------------------------------------------------
@@ -333,4 +351,99 @@ fn shipped_kernels_compile_to_the_ptx_phase_f_measured() {
         assert_eq!(options, ["--fmad=true", "--prec-div=true", "--prec-sqrt=true", "--ftz=false", "-DPI_F32"]);
         assert_eq!(pi_snow_gpu::sha256::sha256_hex(ptx.to_src().as_bytes()), want, "{kernel:?}");
     }
+}
+
+// ---- A2.6: the claim boundary in the JSON and the help ------------------------------------------------------
+
+fn validated_on_fields_present(j: &str) {
+    for part in [
+        "\"validated_on\": {\"gpu\": \"RTX 5090\"", "\"arch\": \"sm_120\"", "\"driver\": 13040", "\"nvrtc\": \"13.3\"",
+        "\"precision\": \"F32\"", "\"season\": \"2025-11-01 to 2026-04-30\"", "\"matches_validated_setup\"",
+    ] {
+        assert!(j.contains(part), "{part} missing in {j}");
+    }
+}
+
+#[test]
+fn both_run_json_blocks_carry_the_a2_6_boundary() {
+    validated_on_fields_present(&NonfiniteScan::EveryStep.run_json(Kernel::K1h, &Kernel::K1h.source_sha256(), true));
+    validated_on_fields_present(&auto(Precision::F32, &fresh(23.0, 61.0), &live(30.0, 62.0)).unwrap().run_json(true));
+    let j = NonfiniteScan::EveryStep.run_json(Kernel::K1h, "x", false);
+    assert!(j.contains("\"matches_validated_setup\": false"), "{j}");
+}
+
+#[test]
+fn help_states_where_the_claims_hold() {
+    for part in ["ai100's RTX 5090 (sm_120)", "driver 13040", "NVRTC 13.3", "F32", "2025-11-01 to 2026-04-30", "fit, not to be faster", "matches_validated_setup"] {
+        assert!(GRID_HELP.contains(part), "{part} missing in the help");
+    }
+}
+
+#[test]
+fn the_validated_ptx_table_covers_the_three_shipped_kernels() {
+    let kernels: Vec<Kernel> = VALIDATED_PTX.iter().map(|(k, _)| *k).collect();
+    assert_eq!(kernels, vec![Kernel::Pinned, Kernel::K1h, Kernel::K2]);
+}
+
+// ---- resuming an output directory (review change 1) ----------------------------------------------------------
+
+fn batch_json(bi: usize, columns: usize, setting: &str, kernel: &str, precision: &str) -> String {
+    format!(
+        "{{\"batch\": {bi}, \"columns\": {columns}, \"nmax\": 2048, \"days\": 181, \"engine\": {{\"precision\": \"{precision}\", \"arch\": \"sm_120\"}}, \"nonfinite_scan\": {{\"setting\": \"{setting}\", \"kernel\": \"{kernel}\"}}, \"batch_auto\": null}}\n"
+    )
+}
+
+fn scan_block(setting: &str, kernel: &str) -> String {
+    format!("{{\"setting\": \"{setting}\", \"kernel\": \"{kernel}\"}}")
+}
+
+const ENGINE_F32: &str = "{\"precision\": \"F32\", \"arch\": \"sm_120\"}";
+
+#[test]
+fn resume_refuses_a_directory_written_at_another_width() {
+    let dir = temp_dir("resume-width");
+    // The first run chose 32,768 and finished batch 0 (columns 0 to 32,767), then stopped.
+    std::fs::write(dir.join("batch-0000.json"), batch_json(0, 32_768, "every-step", "k1h", "F32")).unwrap();
+    // The restart picks 83,232 over 83,232 pixels: batch 0 would hold all of them. Refused, with the width named.
+    let e = pi_snow_gpu::grid::check_resume(&dir, 83_232, 83_232, &scan_block("every-step", "k1h"), ENGINE_F32).unwrap_err().to_string();
+    assert!(e.contains("32768 columns") && e.contains("pass --batch 32768"), "{e}");
+    // Restarting at the width that wrote it is fine, including a short last batch.
+    pi_snow_gpu::grid::check_resume(&dir, 83_232, 32_768, &scan_block("every-step", "k1h"), ENGINE_F32).unwrap();
+    std::fs::write(dir.join("batch-0002.json"), batch_json(2, 17_696, "every-step", "k1h", "F32")).unwrap();
+    pi_snow_gpu::grid::check_resume(&dir, 83_232, 32_768, &scan_block("every-step", "k1h"), ENGINE_F32).unwrap();
+    // A last batch of the wrong length is refused too.
+    std::fs::write(dir.join("batch-0002.json"), batch_json(2, 16_384, "every-step", "k1h", "F32")).unwrap();
+    assert!(pi_snow_gpu::grid::check_resume(&dir, 83_232, 32_768, &scan_block("every-step", "k1h"), ENGINE_F32).is_err());
+}
+
+#[test]
+fn resume_refuses_a_different_kernel_setting_or_precision() {
+    let dir = temp_dir("resume-setting");
+    std::fs::write(dir.join("batch-0000.json"), batch_json(0, 16_384, "every-step", "k1h", "F32")).unwrap();
+    let ok = |scan: &str, engine: &str| pi_snow_gpu::grid::check_resume(&dir, 83_232, 16_384, scan, engine);
+    ok(&scan_block("every-step", "k1h"), ENGINE_F32).unwrap();
+    assert!(ok(&scan_block("every-step", "pinned"), ENGINE_F32).is_err(), "another kernel");
+    assert!(ok(&scan_block("hourly", "k2"), ENGINE_F32).is_err(), "another setting");
+    assert!(ok(&scan_block("every-step", "k1h"), "{\"precision\": \"F64\"}").is_err(), "another precision");
+}
+
+#[test]
+fn resume_treats_a_pre_settings_directory_as_the_pinned_kernel() {
+    let dir = temp_dir("resume-old");
+    // Written before the settings existed: no nonfinite_scan block, the pinned kernel.
+    std::fs::write(dir.join("batch-0000.json"), "{\"batch\": 0, \"columns\": 16384, \"engine\": {\"precision\": \"F64\"}}\n").unwrap();
+    let f64e = "{\"precision\": \"F64\"}";
+    // Every-step at F64 runs the pinned kernel at F64: the same engine, so the resume is allowed.
+    pi_snow_gpu::grid::check_resume(&dir, 83_232, 16_384, &scan_block("every-step", "pinned"), f64e).unwrap();
+    // Another width, kernel or precision is still refused.
+    assert!(pi_snow_gpu::grid::check_resume(&dir, 83_232, 32_768, &scan_block("every-step", "pinned"), f64e).is_err());
+    assert!(pi_snow_gpu::grid::check_resume(&dir, 83_232, 16_384, &scan_block("every-step", "k1h"), "{\"precision\": \"F32\"}").is_err());
+}
+
+#[test]
+fn resume_ignores_an_empty_or_missing_directory() {
+    let none = temp_dir("resume-none").join("not-there");
+    pi_snow_gpu::grid::check_resume(&none, 100, 50, &scan_block("every-step", "k1h"), ENGINE_F32).unwrap();
+    let empty = temp_dir("resume-empty");
+    pi_snow_gpu::grid::check_resume(&empty, 100, 50, &scan_block("every-step", "k1h"), ENGINE_F32).unwrap();
 }

@@ -380,6 +380,14 @@ fn help_states_where_the_claims_hold() {
 }
 
 #[test]
+fn help_says_to_run_with_the_printed_width_after_posting_the_reserve() {
+    // Gates review of step P: a reserve posted for the width `auto` printed shrinks the budget a later `auto` reads.
+    for part in ["--dry-run prints it", "run with `--batch N` as printed", "a posted reserve shrinks the GPU budget `auto` then reads", "narrower width than the dry run did"] {
+        assert!(GRID_HELP.contains(part), "{part} missing in the help");
+    }
+}
+
+#[test]
 fn the_validated_ptx_table_covers_the_three_shipped_kernels() {
     let kernels: Vec<Kernel> = VALIDATED_PTX.iter().map(|(k, _)| *k).collect();
     assert_eq!(kernels, vec![Kernel::Pinned, Kernel::K1h, Kernel::K2]);

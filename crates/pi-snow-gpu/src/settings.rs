@@ -92,7 +92,10 @@ pi-snow-gpu grid --forcing DIR --ini TEMPLATE --pixels FILE --out DIR
   --batch N|auto          columns per launch. `auto` (the default) takes the validated width with the smallest
                           median GPU-line ratio that fits the broker budget and the live memory readings; it
                           returns 16384 when the broker file is stale, and at any precision other than F32. It
-                          never posts a reservation: post one for the width it reports (--dry-run prints it).
+                          never posts a reservation: post one for the width it reports (--dry-run prints it), then
+                          run with `--batch N` as printed: a posted reserve shrinks the GPU budget `auto` then reads,
+                          so `auto` run after posting its own reserve chooses a narrower width than the dry run did
+                          (on a 31.8 GiB card it cannot choose 83232 once the reserve for it is held).
   --nonfinite-scan S      every-step (default): the non-finite check after every step; the K1h kernel at F32, the
                           pinned kernel at other precisions; byte-identical to the pinned kernel.
                           hourly: K2, NON-EQUIVALENT: refusals can land up to five steps late and the refused set

@@ -4,8 +4,9 @@
 //! pi-snow-gpu batch ...                                    pi-snow batch's interface (src/batch.rs)
 //! pi-snow-gpu lockstep --list FILE --from R --to R --out JSON [--precision F64|F32|F32K]
 //!                                                        G1a or precision development lockstep
-//! pi-snow-gpu grid --forcing DIR --ini TEMPLATE --pixels FILE --batch B --out DIR
-//!                [--precision F64|MIX|F32|F32K] [--nmax N] [--threads T]   grid season, daily fields (G2)
+//! pi-snow-gpu grid --forcing DIR --ini TEMPLATE --pixels FILE --out DIR [--batch N|auto]
+//!                [--nonfinite-scan every-step|hourly] [--precision F64|MIX|F32|F32K] [--nmax N] [--threads T]
+//!                [--dry-run]   grid season, daily fields (G2); settings: `grid --help`
 //! pi-snow-gpu write-units --forcing DIR --ini TEMPLATE --pixels FILE --out DIR
 //!                unit directories (INI, 10-minute SMET, SNO) for pi-snow and batch (G1c, G2)
 //! pi-snow-gpu cpu-grid --forcing DIR --ini TEMPLATE --pixels FILE --threads T --out JSON
@@ -248,7 +249,14 @@ fn read_indices(path: &str) -> Result<Vec<usize>> {
 }
 
 fn grid(args: &[String]) -> Result<()> {
-    let o = options(args, &["--forcing", "--ini", "--pixels", "--batch", "--out", "--precision", "--nmax", "--threads"])?;
+    use pi_snow_gpu::settings::{self, BatchSetting, Live, NonfiniteScan};
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{}", settings::GRID_HELP);
+        return Ok(());
+    }
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let rest: Vec<String> = args.iter().filter(|a| *a != "--dry-run").cloned().collect();
+    let o = options(&rest, &["--forcing", "--ini", "--pixels", "--batch", "--out", "--precision", "--nmax", "--threads", "--nonfinite-scan"])?;
     let get = |k: &str| o.get(k).cloned().with_context(|| format!("{k} is required"));
     let precision = match o.get("--precision").map(String::as_str).unwrap_or("F64") {
         "F64" => Precision::F64,
@@ -257,16 +265,48 @@ fn grid(args: &[String]) -> Result<()> {
         "F32K" => Precision::F32K,
         other => bail!("bad precision {other}"),
     };
+    let scan = NonfiniteScan::parse(o.get("--nonfinite-scan").map(String::as_str).unwrap_or(settings::DEFAULT_NONFINITE_SCAN), settings::HOURLY_OFFERED)?;
+    let kernel = scan.kernel(precision)?;
+    let batch_setting = BatchSetting::parse(o.get("--batch").map(String::as_str).unwrap_or(settings::DEFAULT_BATCH))?;
+    let gpu = Gpu::with_kernel(precision, kernel)?;
+    let matches_validated = settings::matches_validated_setup(&gpu.build, kernel);
+    let nonfinite_scan_json = scan.run_json(kernel, &gpu.build.source_sha256, matches_validated);
+    let (batch, batch_auto_json, reserve) = match batch_setting {
+        BatchSetting::Fixed(n) => {
+            let (dev, ram) = settings::reserve_for_fixed(precision, n, &settings::VALIDATED_WIDTHS);
+            (n, None, (dev, ram, (precision != Precision::F32).then_some(settings::F32_ONLY_SIZES)))
+        }
+        BatchSetting::Auto => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let machine = PathBuf::from(&home).join(".machine");
+            let state = settings::broker_state(&machine, &machine.join("MACHINE_STATUS.md"), chrono::Utc::now());
+            let live = Live { gpu_free_bytes: gpu.mem_info()?.0 as u64, ram_available_kib: settings::read_meminfo_available_kib()? };
+            let choice = settings::select_auto(precision, &state, &live, &settings::VALIDATED_WIDTHS)?;
+            (choice.chosen, Some(choice.run_json(matches_validated)), (choice.reserve_gpu_gib, choice.reserve_ram_gib, choice.note))
+        }
+    };
+    eprintln!("grid: nonfinite-scan {} (kernel {}), batch {batch}", scan.label(), kernel.label());
+    if dry_run {
+        println!(
+            "{{\"nonfinite_scan\": {nonfinite_scan_json}, \"batch\": {batch}, \"batch_auto\": {}, \"reserve_to_post\": {{\"gpu_gib\": {}, \"ram_gib\": {}, \"note\": {}}}}}",
+            batch_auto_json.as_deref().unwrap_or("null"),
+            reserve.0.map_or("null".to_string(), |r| format!("{r:.2}")),
+            reserve.1.map_or("null".to_string(), |r| format!("{r:.2}")),
+            reserve.2.map_or("null".to_string(), |n| format!("\"{n}\""))
+        );
+        return Ok(());
+    }
     let args = pi_snow_gpu::grid::GridArgs {
         forcing_dir: PathBuf::from(get("--forcing")?),
         ini_template: PathBuf::from(get("--ini")?),
         pixels: read_indices(&get("--pixels")?)?,
-        batch: get("--batch")?.parse()?,
+        batch,
         nmax: o.get("--nmax").map(|s| s.parse()).transpose()?.unwrap_or(NMAX),
         out_dir: PathBuf::from(get("--out")?),
         threads: o.get("--threads").map(|s| s.parse()).transpose()?.unwrap_or(1),
+        nonfinite_scan_json,
+        batch_auto_json,
     };
-    let gpu = Gpu::new(precision)?;
     pi_snow_gpu::grid::run(&gpu, &args)
 }
 

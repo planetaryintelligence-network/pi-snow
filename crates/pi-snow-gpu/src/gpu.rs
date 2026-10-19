@@ -21,7 +21,43 @@ use pi_snow_physics::turbulence::Scheme;
 use crate::sha256::sha256_hex;
 use crate::stepper::{Accum, Constants, LastForcing, Site};
 
+/// The pinned kernel (`engine-gpu-v1` plus the finite guard, `37c3e333`): what every command ran before the
+/// `grid --nonfinite-scan` setting existed, and still what `Gpu::new` compiles.
 pub const KERNEL_SOURCE: &str = include_str!("../kernels/pi_snow.cu");
+const KERNEL_SOURCE_K1H: &str = include_str!("../kernels/pi_snow_k1h.cu");
+const KERNEL_SOURCE_K2: &str = include_str!("../kernels/pi_snow_k2.cu");
+
+/// The kernel files a setting can select (gpu-alternatives-v4 Amendment 2). `Pinned` is the guarded baseline (K0);
+/// `K1h` is K1 with seven text transforms, byte-identical to `Pinned` at F32 in every Phase F unit; `K2` scans once
+/// an hour and is NOT equivalent (refusals up to five steps late). There is no kernel without the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kernel {
+    Pinned,
+    K1h,
+    K2,
+}
+
+impl Kernel {
+    pub fn source(self) -> &'static str {
+        match self {
+            Kernel::Pinned => KERNEL_SOURCE,
+            Kernel::K1h => KERNEL_SOURCE_K1H,
+            Kernel::K2 => KERNEL_SOURCE_K2,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Kernel::Pinned => "pinned",
+            Kernel::K1h => "k1h",
+            Kernel::K2 => "k2",
+        }
+    }
+
+    pub fn source_sha256(self) -> String {
+        sha256_hex(self.source().as_bytes())
+    }
+}
 
 /// Forcing fields per row, in the kernel's `F_*` order.
 pub const F_COUNT: usize = 8;
@@ -173,6 +209,52 @@ impl Build {
     }
 }
 
+pub const ARCH: &str = "sm_120";
+
+/// NVRTC options for a precision (CPU side only; every option is explicit, plan.md section 3.1).
+pub fn compile_options(precision: Precision) -> Vec<String> {
+    let mut options: Vec<String> = ["--fmad=false", "--prec-div=true", "--prec-sqrt=true", "--ftz=false"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    match precision {
+        Precision::Mix => options.push("-DPI_MIX".into()),
+        Precision::F32 => {
+            options[0] = "--fmad=true".into();
+            options.push("-DPI_F32".into());
+        }
+        Precision::F32K => {
+            options[0] = "--fmad=true".into();
+            options.push("-DPI_F32K".into());
+        }
+        Precision::F64 => {}
+    }
+    options
+}
+
+/// Compile one kernel to PTX. Needs NVRTC only, no device and no context, so a CPU test can pin the PTX hash.
+pub fn compile_kernel(precision: Precision, kernel: Kernel) -> Result<(cudarc::nvrtc::Ptx, Vec<String>)> {
+    let options = compile_options(precision);
+    let opts = CompileOptions { arch: Some(ARCH), options: options.clone(), ..Default::default() };
+    let ptx = compile_ptx_with_opts(kernel.source(), opts).map_err(|e| anyhow::anyhow!("NVRTC: {e:?}"))?;
+    Ok((ptx, options))
+}
+
+/// NVRTC's version, or `None` when the library cannot be loaded (a machine without CUDA).
+pub fn nvrtc_version_pair() -> Option<(i32, i32)> {
+    let (mut major, mut minor) = (0i32, 0i32);
+    // SAFETY: plain out-parameter query. `dynamic-loading` makes the call panic if the library is absent, so the
+    // load is attempted first and a failure is reported as None.
+    let loaded = std::panic::catch_unwind(|| unsafe { cudarc::nvrtc::sys::is_culib_present() }).unwrap_or(false);
+    if !loaded {
+        return None;
+    }
+    unsafe {
+        cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor);
+    }
+    Some((major, minor))
+}
+
 pub struct Gpu {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
@@ -181,37 +263,16 @@ pub struct Gpu {
 }
 
 impl Gpu {
+    /// The pinned kernel, as before the settings existed.
     pub fn new(precision: Precision) -> Result<Self> {
+        Self::with_kernel(precision, Kernel::Pinned)
+    }
+
+    pub fn with_kernel(precision: Precision, kernel: Kernel) -> Result<Self> {
+        let source = kernel.source();
         let ctx = CudaContext::new(0).context("CUDA device 0")?;
-        let arch = "sm_120";
-        let mut options: Vec<String> = [
-            "--fmad=false",
-            "--prec-div=true",
-            "--prec-sqrt=true",
-            "--ftz=false",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        match precision {
-            Precision::Mix => options.push("-DPI_MIX".into()),
-            Precision::F32 => {
-                options[0] = "--fmad=true".into();
-                options.push("-DPI_F32".into());
-            }
-            Precision::F32K => {
-                options[0] = "--fmad=true".into();
-                options.push("-DPI_F32K".into());
-            }
-            Precision::F64 => {}
-        }
-        let opts = CompileOptions {
-            arch: Some(arch),
-            options: options.clone(),
-            ..Default::default()
-        };
-        let ptx = compile_ptx_with_opts(KERNEL_SOURCE, opts)
-            .map_err(|e| anyhow::anyhow!("NVRTC: {e:?}"))?;
+        let (ptx, options) = compile_kernel(precision, kernel)?;
+        let arch = ARCH;
         let ptx_sha256 = sha256_hex(ptx.to_src().as_bytes());
         let module = ctx.load_module(ptx)?;
         let advance = module.load_function("pi_snow_advance")?;
@@ -233,7 +294,7 @@ impl Gpu {
                 driver_version,
                 arch,
                 options,
-                source_sha256: sha256_hex(KERNEL_SOURCE.as_bytes()),
+                source_sha256: sha256_hex(source.as_bytes()),
                 ptx_sha256,
             },
         })

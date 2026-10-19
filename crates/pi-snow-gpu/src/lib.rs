@@ -16,4 +16,5 @@ pub mod sha256;
 pub mod lockstep;
 pub mod mo;
 pub mod runner;
+pub mod settings;
 pub mod synth;

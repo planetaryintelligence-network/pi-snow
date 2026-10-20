@@ -16,3 +16,15 @@ The toolchain is pinned to 1.93.1 in `rust-toolchain.toml`. Build with
 This history was split out of pi-pod, the avalanche research repository whose experiments
 drive the model. Records there made before the split name paths under `rust/`; the same
 files sit at this repository's root.
+
+## License
+
+Copyright (c) 2026 The Planetary Intelligence Network contributors.
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option. Use it for anything; keep the copyright
+notice and license text with copies or substantial portions of it.
+
+Unless you explicitly state otherwise, any contribution you intentionally submit for
+inclusion in this work, as defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
